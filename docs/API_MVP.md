@@ -82,6 +82,42 @@ ou
   - bloqueia se existirem reservas ativas
   - para remoção forçada (e apagar reservas associadas): `DELETE /api/accommodations/:id?force=true`
 
+## Rate Plans e Cotação
+- `GET /api/rate-plans`
+  - filtros opcionais: `accommodationId`
+  - paginação/ordenação opcionais: `page`, `pageSize`, `sortBy`, `sortDir`
+- `POST /api/rate-plans`
+```json
+{
+  "accommodationId": "acc_123",
+  "name": "Tarifa Standard",
+  "currency": "EUR",
+  "baseNightlyRate": 95,
+  "weekendMultiplier": 1.2,
+  "extraAdultFee": 15,
+  "extraChildFee": 8,
+  "minNights": 1,
+  "seasonalAdjustments": [
+    {
+      "startDate": "2026-12-01",
+      "endDate": "2026-12-31",
+      "multiplier": 1.1
+    }
+  ]
+}
+```
+- `POST /api/rate-quote`
+```json
+{
+  "accommodationId": "acc_123",
+  "ratePlanId": "rp_123",
+  "checkIn": "2026-12-04",
+  "checkOut": "2026-12-06",
+  "adults": 3,
+  "children": 1
+}
+```
+
 ## Reservas
 - `GET /api/reservations`
   - filtros opcionais: `accommodationId`, `status`, `dateFrom`, `dateTo`

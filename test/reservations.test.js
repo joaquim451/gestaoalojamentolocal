@@ -527,6 +527,84 @@ test('DELETE /api/accommodations/:id force removes accommodation and reservation
   assert.equal(reservations.json.data.length, 0);
 });
 
+test('POST /api/rate-plans creates rate plan and GET /api/rate-plans lists it', async () => {
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Standard',
+      currency: 'EUR',
+      baseNightlyRate: 95,
+      weekendMultiplier: 1.2,
+      extraAdultFee: 15,
+      extraChildFee: 8,
+      minNights: 1
+    },
+    token
+  );
+
+  const listed = await request(
+    server,
+    'GET',
+    '/api/rate-plans?accommodationId=acc_test_1&page=1&pageSize=10&sortBy=name&sortDir=asc',
+    null,
+    token
+  );
+
+  assert.equal(created.status, 201);
+  assert.equal(created.json.ok, true);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.json.ok, true);
+  assert.equal(listed.json.data.length, 1);
+  assert.equal(listed.json.data[0].name, 'Tarifa Standard');
+});
+
+test('POST /api/rate-quote calculates dynamic total', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Flex',
+      currency: 'EUR',
+      baseNightlyRate: 100,
+      weekendMultiplier: 1.2,
+      extraAdultFee: 10,
+      extraChildFee: 5,
+      minNights: 1,
+      seasonalAdjustments: [
+        { startDate: '2026-12-01', endDate: '2026-12-31', multiplier: 1.1 }
+      ]
+    },
+    token
+  );
+
+  const quote = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-04',
+      checkOut: '2026-12-06',
+      adults: 3,
+      children: 1
+    },
+    token
+  );
+
+  assert.equal(quote.status, 200);
+  assert.equal(quote.json.ok, true);
+  assert.equal(quote.json.data.nights, 2);
+  assert.equal(quote.json.data.pricing.total, 294);
+});
+
 test('POST /api/reservations creates valid reservation', async () => {
   const token = await loginAsAdmin(server);
   const response = await request(

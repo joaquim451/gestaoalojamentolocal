@@ -28,6 +28,37 @@ function hasDateRangeOverlap(aStart, aEnd, bStart, bEnd) {
   return new Date(aStart) < new Date(bEnd) && new Date(aEnd) > new Date(bStart);
 }
 
+function formatIsoDateOnly(inputDate) {
+  return new Date(inputDate).toISOString().slice(0, 10);
+}
+
+function addDays(inputDate, days) {
+  const date = new Date(inputDate);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date;
+}
+
+function countNights(checkIn, checkOut) {
+  const start = new Date(checkIn);
+  const end = new Date(checkOut);
+  return Math.floor((end - start) / (24 * 60 * 60 * 1000));
+}
+
+function pickSeasonalMultiplier(seasonalAdjustments, dateStr) {
+  if (!Array.isArray(seasonalAdjustments)) {
+    return 1;
+  }
+  for (const item of seasonalAdjustments) {
+    if (!item || !item.startDate || !item.endDate || !item.multiplier) {
+      continue;
+    }
+    if (dateStr >= item.startDate && dateStr <= item.endDate) {
+      return Number(item.multiplier) || 1;
+    }
+  }
+  return 1;
+}
+
 function normalizeUsersCollection(db) {
   if (!Array.isArray(db.users)) {
     db.users = [];
@@ -52,6 +83,9 @@ function normalizeDomainCollections(db) {
   }
   if (!Array.isArray(db.reservations)) {
     db.reservations = [];
+  }
+  if (!Array.isArray(db.ratePlans)) {
+    db.ratePlans = [];
   }
 }
 
@@ -735,6 +769,174 @@ app.delete('/api/accommodations/:id', (req, res) => {
     message: force
       ? `Alojamento removido com sucesso. Reservas removidas: ${removedReservations}.`
       : 'Alojamento removido com sucesso.'
+  });
+});
+
+app.get('/api/rate-plans', (req, res) => {
+  const { accommodationId, page, pageSize, sortBy, sortDir } = req.query || {};
+  const db = readDb();
+  normalizeDomainCollections(db);
+
+  let data = db.ratePlans;
+  if (accommodationId) {
+    data = data.filter((item) => item.accommodationId === accommodationId);
+  }
+
+  const allowedSortFields = new Set(['name', 'baseNightlyRate', 'createdAt', 'updatedAt']);
+  const selectedSortBy = allowedSortFields.has(sortBy) ? sortBy : 'createdAt';
+  const selectedSortDir = parseSortDir(sortDir, 'desc');
+  const selectedPage = parsePositiveInt(page, 1, 1, 100000);
+  const selectedPageSize = parsePositiveInt(pageSize, 50, 1, 200);
+
+  const sorted = sortItems(data, selectedSortBy, selectedSortDir);
+  const paginated = paginateItems(sorted, selectedPage, selectedPageSize);
+
+  return res.json({
+    ok: true,
+    data: paginated.data,
+    meta: { ...paginated.meta, sortBy: selectedSortBy, sortDir: selectedSortDir }
+  });
+});
+
+app.post('/api/rate-plans', (req, res) => {
+  const {
+    accommodationId,
+    name,
+    currency,
+    baseNightlyRate,
+    weekendMultiplier,
+    extraAdultFee,
+    extraChildFee,
+    minNights,
+    seasonalAdjustments
+  } = req.body || {};
+
+  if (!accommodationId || !name) {
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: accommodationId, name' });
+  }
+
+  const baseRate = Number(baseNightlyRate);
+  if (!Number.isFinite(baseRate) || baseRate <= 0) {
+    return res.status(400).json({ ok: false, error: 'baseNightlyRate deve ser numero positivo.' });
+  }
+
+  const db = readDb();
+  normalizeDomainCollections(db);
+  const accommodation = db.accommodations.find((item) => item.id === accommodationId);
+  if (!accommodation) {
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
+  }
+
+  const plan = {
+    id: nextId('rp'),
+    accommodationId,
+    name: String(name).trim(),
+    currency: currency || 'EUR',
+    baseNightlyRate: baseRate,
+    weekendMultiplier: Number.isFinite(Number(weekendMultiplier)) ? Number(weekendMultiplier) : 1,
+    extraAdultFee: Number.isFinite(Number(extraAdultFee)) ? Number(extraAdultFee) : 0,
+    extraChildFee: Number.isFinite(Number(extraChildFee)) ? Number(extraChildFee) : 0,
+    minNights: Number.isFinite(Number(minNights)) ? Number(minNights) : 1,
+    seasonalAdjustments: Array.isArray(seasonalAdjustments) ? seasonalAdjustments : [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  db.ratePlans.push(plan);
+  appendAuditLog(db, {
+    action: 'rate_plans.create',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'rate_plan', id: plan.id },
+    metadata: { accommodationId: plan.accommodationId, name: plan.name, currency: plan.currency }
+  });
+  writeDb(db);
+
+  return res.status(201).json({ ok: true, data: plan });
+});
+
+app.post('/api/rate-quote', (req, res) => {
+  const { accommodationId, ratePlanId, checkIn, checkOut, adults, children } = req.body || {};
+  if (!accommodationId || !checkIn || !checkOut) {
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: accommodationId, checkIn, checkOut' });
+  }
+  if (!isValidIsoDate(checkIn) || !isValidIsoDate(checkOut) || new Date(checkIn) >= new Date(checkOut)) {
+    return res.status(400).json({ ok: false, error: 'Intervalo de datas invalido.' });
+  }
+
+  const db = readDb();
+  normalizeDomainCollections(db);
+  const accommodation = db.accommodations.find((item) => item.id === accommodationId);
+  if (!accommodation) {
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
+  }
+
+  const plans = db.ratePlans.filter((item) => item.accommodationId === accommodationId);
+  if (plans.length === 0) {
+    return res.status(404).json({ ok: false, error: 'Nao existem rate plans para este alojamento.' });
+  }
+
+  const plan = ratePlanId
+    ? plans.find((item) => item.id === ratePlanId)
+    : plans[0];
+  if (!plan) {
+    return res.status(404).json({ ok: false, error: 'Rate plan nao encontrado para este alojamento.' });
+  }
+
+  const nights = countNights(checkIn, checkOut);
+  if (nights < Number(plan.minNights || 1)) {
+    return res.status(400).json({ ok: false, error: `Estadia minima: ${plan.minNights} noites.` });
+  }
+
+  const safeAdults = Number.isFinite(Number(adults)) ? Number(adults) : 1;
+  const safeChildren = Number.isFinite(Number(children)) ? Number(children) : 0;
+  const perNightDetails = [];
+  let subtotal = 0;
+
+  for (let i = 0; i < nights; i += 1) {
+    const date = addDays(checkIn, i);
+    const dateStr = formatIsoDateOnly(date);
+    const dayOfWeek = date.getUTCDay();
+    const isWeekend = dayOfWeek === 5 || dayOfWeek === 6;
+    const weekendMult = isWeekend ? Number(plan.weekendMultiplier || 1) : 1;
+    const seasonalMult = pickSeasonalMultiplier(plan.seasonalAdjustments, dateStr);
+    const base = Number(plan.baseNightlyRate);
+    const nightlyRate = base * weekendMult * seasonalMult;
+    subtotal += nightlyRate;
+
+    perNightDetails.push({
+      date: dateStr,
+      baseRate: base,
+      weekendMultiplier: weekendMult,
+      seasonalMultiplier: seasonalMult,
+      nightlyRate: Number(nightlyRate.toFixed(2))
+    });
+  }
+
+  const extraAdults = Math.max(safeAdults - 2, 0);
+  const occupancyFees = nights * (
+    extraAdults * Number(plan.extraAdultFee || 0)
+    + safeChildren * Number(plan.extraChildFee || 0)
+  );
+  const total = Number((subtotal + occupancyFees).toFixed(2));
+
+  return res.json({
+    ok: true,
+    data: {
+      accommodationId,
+      ratePlanId: plan.id,
+      ratePlanName: plan.name,
+      currency: plan.currency,
+      checkIn,
+      checkOut,
+      nights,
+      guests: { adults: safeAdults, children: safeChildren },
+      perNightDetails,
+      pricing: {
+        subtotal: Number(subtotal.toFixed(2)),
+        occupancyFees: Number(occupancyFees.toFixed(2)),
+        total
+      }
+    }
   });
 });
 
