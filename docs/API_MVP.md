@@ -129,13 +129,30 @@ ou
   "startDate": "2026-12-24",
   "endDate": "2026-12-26",
   "closed": true,
+  "closedToArrival": false,
+  "closedToDeparture": false,
   "minNights": 0,
+  "maxNights": 0,
   "note": "Natal fechado"
 }
 ```
 - Efeito no `POST /api/rate-quote`:
   - bloqueia cotação em datas `closed=true` (`HTTP 409`)
+  - bloqueia check-in em datas `closedToArrival=true`
+  - bloqueia check-out em datas `closedToDeparture=true`
   - aplica estadia mínima por período (`minNights`)
+  - aplica estadia máxima por período (`maxNights`)
+
+## Calendário de Disponibilidade (Diário)
+- `GET /api/availability-calendar`
+  - query obrigatórios: `accommodationId`, `dateFrom`, `dateTo`
+  - query opcionais: `ratePlanId`, `adults`, `children`
+  - devolve por dia:
+    - estado (`available`, `booked`, `closed`)
+    - IDs de reservas a ocupar a data
+    - regras de disponibilidade acionadas
+    - flags de restrição (`closedToArrival`, `closedToDeparture`, `minNightsConstraint`, `maxNightsConstraint`)
+    - preço sugerido por noite (quando existir rate plan)
 
 ## Reservas
 - `GET /api/reservations`

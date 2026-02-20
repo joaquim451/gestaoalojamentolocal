@@ -64,9 +64,16 @@ function pickAvailabilityConstraints(availabilityRules, accommodationId, dateStr
     return item.accommodationId === accommodationId && dateStr >= item.startDate && dateStr <= item.endDate;
   });
 
+  const positiveMaxNights = matching
+    .map((item) => Number(item.maxNights) || 0)
+    .filter((value) => value > 0);
+
   return {
     closed: matching.some((item) => Boolean(item.closed)),
+    closedToArrival: matching.some((item) => Boolean(item.closedToArrival)),
+    closedToDeparture: matching.some((item) => Boolean(item.closedToDeparture)),
     minNights: matching.reduce((acc, item) => Math.max(acc, Number(item.minNights) || 0), 0),
+    maxNights: positiveMaxNights.length > 0 ? Math.min(...positiveMaxNights) : 0,
     matchingRuleIds: matching.map((item) => item.id)
   };
 }
@@ -895,7 +902,17 @@ app.get('/api/availability-rules', (req, res) => {
 });
 
 app.post('/api/availability-rules', (req, res) => {
-  const { accommodationId, startDate, endDate, closed, minNights, note } = req.body || {};
+  const {
+    accommodationId,
+    startDate,
+    endDate,
+    closed,
+    closedToArrival,
+    closedToDeparture,
+    minNights,
+    maxNights,
+    note
+  } = req.body || {};
   if (!accommodationId || !startDate || !endDate) {
     return res.status(400).json({ ok: false, error: 'Campos obrigatorios: accommodationId, startDate, endDate' });
   }
@@ -911,13 +928,21 @@ app.post('/api/availability-rules', (req, res) => {
   }
 
   const normalizedMinNights = Number.isFinite(Number(minNights)) ? Number(minNights) : 0;
+  const normalizedMaxNights = Number.isFinite(Number(maxNights)) ? Number(maxNights) : 0;
+  if (normalizedMaxNights > 0 && normalizedMaxNights < normalizedMinNights) {
+    return res.status(400).json({ ok: false, error: 'maxNights nao pode ser inferior a minNights.' });
+  }
+
   const rule = {
     id: nextId('ar'),
     accommodationId,
     startDate: formatIsoDateOnly(startDate),
     endDate: formatIsoDateOnly(endDate),
     closed: Boolean(closed),
+    closedToArrival: Boolean(closedToArrival),
+    closedToDeparture: Boolean(closedToDeparture),
     minNights: Math.max(normalizedMinNights, 0),
+    maxNights: Math.max(normalizedMaxNights, 0),
     note: note || null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -933,7 +958,10 @@ app.post('/api/availability-rules', (req, res) => {
       startDate: rule.startDate,
       endDate: rule.endDate,
       closed: rule.closed,
-      minNights: rule.minNights
+      closedToArrival: rule.closedToArrival,
+      closedToDeparture: rule.closedToDeparture,
+      minNights: rule.minNights,
+      maxNights: rule.maxNights
     }
   });
   writeDb(db);
@@ -971,12 +999,30 @@ app.post('/api/rate-quote', (req, res) => {
 
   const nights = countNights(checkIn, checkOut);
   const minNightsFromPlan = Number(plan.minNights || 1);
+  const arrivalConstraints = pickAvailabilityConstraints(db.availabilityRules, accommodationId, formatIsoDateOnly(checkIn));
+  const departureConstraints = pickAvailabilityConstraints(db.availabilityRules, accommodationId, formatIsoDateOnly(checkOut));
+
+  if (arrivalConstraints.closedToArrival) {
+    return res.status(409).json({
+      ok: false,
+      error: `Check-in indisponivel em ${formatIsoDateOnly(checkIn)} (closedToArrival).`,
+      details: { date: formatIsoDateOnly(checkIn), matchingRuleIds: arrivalConstraints.matchingRuleIds }
+    });
+  }
+  if (departureConstraints.closedToDeparture) {
+    return res.status(409).json({
+      ok: false,
+      error: `Check-out indisponivel em ${formatIsoDateOnly(checkOut)} (closedToDeparture).`,
+      details: { date: formatIsoDateOnly(checkOut), matchingRuleIds: departureConstraints.matchingRuleIds }
+    });
+  }
 
   const safeAdults = Number.isFinite(Number(adults)) ? Number(adults) : 1;
   const safeChildren = Number.isFinite(Number(children)) ? Number(children) : 0;
   const perNightDetails = [];
   let subtotal = 0;
   let minNightsFromRules = 0;
+  let maxNightsFromRules = 0;
   const triggeredRuleIds = new Set();
 
   for (let i = 0; i < nights; i += 1) {
@@ -991,6 +1037,9 @@ app.post('/api/rate-quote', (req, res) => {
       });
     }
     minNightsFromRules = Math.max(minNightsFromRules, availability.minNights);
+    maxNightsFromRules = maxNightsFromRules === 0
+      ? availability.maxNights
+      : (availability.maxNights > 0 ? Math.min(maxNightsFromRules, availability.maxNights) : maxNightsFromRules);
     availability.matchingRuleIds.forEach((id) => triggeredRuleIds.add(id));
 
     const dayOfWeek = date.getUTCDay();
@@ -1006,6 +1055,7 @@ app.post('/api/rate-quote', (req, res) => {
       baseRate: base,
       weekendMultiplier: weekendMult,
       seasonalMultiplier: seasonalMult,
+      maxNightsConstraint: availability.maxNights,
       minNightsConstraint: availability.minNights,
       nightlyRate: Number(nightlyRate.toFixed(2))
     });
@@ -1017,6 +1067,13 @@ app.post('/api/rate-quote', (req, res) => {
       ok: false,
       error: `Estadia minima: ${effectiveMinNights} noites.`,
       details: { minNightsFromPlan, minNightsFromRules, nights }
+    });
+  }
+  if (maxNightsFromRules > 0 && nights > maxNightsFromRules) {
+    return res.status(400).json({
+      ok: false,
+      error: `Estadia maxima: ${maxNightsFromRules} noites.`,
+      details: { maxNightsFromRules, nights }
     });
   }
 
@@ -1041,7 +1098,10 @@ app.post('/api/rate-quote', (req, res) => {
       constraints: {
         minNightsFromPlan,
         minNightsFromRules,
+        maxNightsFromRules,
         effectiveMinNights,
+        closedToArrival: arrivalConstraints.closedToArrival,
+        closedToDeparture: departureConstraints.closedToDeparture,
         triggeredAvailabilityRuleIds: [...triggeredRuleIds]
       },
       perNightDetails,
@@ -1050,6 +1110,108 @@ app.post('/api/rate-quote', (req, res) => {
         occupancyFees: Number(occupancyFees.toFixed(2)),
         total
       }
+    }
+  });
+});
+
+app.get('/api/availability-calendar', (req, res) => {
+  const { accommodationId, dateFrom, dateTo, ratePlanId, adults, children } = req.query || {};
+  if (!accommodationId || !dateFrom || !dateTo) {
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: accommodationId, dateFrom, dateTo' });
+  }
+  if (!isValidIsoDate(dateFrom) || !isValidIsoDate(dateTo) || new Date(dateFrom) > new Date(dateTo)) {
+    return res.status(400).json({ ok: false, error: 'Intervalo de datas invalido.' });
+  }
+
+  const db = readDb();
+  normalizeDomainCollections(db);
+  const accommodation = db.accommodations.find((item) => item.id === accommodationId);
+  if (!accommodation) {
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
+  }
+
+  const plans = db.ratePlans.filter((item) => item.accommodationId === accommodationId);
+  const selectedPlan = ratePlanId ? plans.find((item) => item.id === ratePlanId) : plans[0] || null;
+  if (ratePlanId && !selectedPlan) {
+    return res.status(404).json({ ok: false, error: 'Rate plan nao encontrado para este alojamento.' });
+  }
+
+  const safeAdults = Number.isFinite(Number(adults)) ? Number(adults) : 1;
+  const safeChildren = Number.isFinite(Number(children)) ? Number(children) : 0;
+  const extraAdults = Math.max(safeAdults - 2, 0);
+  const start = new Date(dateFrom);
+  const end = new Date(dateTo);
+  const days = [];
+
+  for (let cursor = new Date(start); cursor <= end; cursor = addDays(cursor, 1)) {
+    const dateStr = formatIsoDateOnly(cursor);
+    const nextDay = formatIsoDateOnly(addDays(cursor, 1));
+
+    const bookedReservations = db.reservations.filter((item) => {
+      if (item.accommodationId !== accommodationId || item.status === 'cancelled') {
+        return false;
+      }
+      return hasDateRangeOverlap(item.checkIn, item.checkOut, dateStr, nextDay);
+    });
+
+    const availability = pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr);
+    let status = 'available';
+    let reason = null;
+    if (bookedReservations.length > 0) {
+      status = 'booked';
+      reason = 'occupied_by_reservation';
+    } else if (availability.closed) {
+      status = 'closed';
+      reason = 'blackout_rule';
+    }
+
+    let pricing = null;
+    if (selectedPlan) {
+      const dayOfWeek = cursor.getUTCDay();
+      const isWeekend = dayOfWeek === 5 || dayOfWeek === 6;
+      const weekendMult = isWeekend ? Number(selectedPlan.weekendMultiplier || 1) : 1;
+      const seasonalMult = pickSeasonalMultiplier(selectedPlan.seasonalAdjustments, dateStr);
+      const baseRate = Number(selectedPlan.baseNightlyRate);
+      const baseWithMultipliers = baseRate * weekendMult * seasonalMult;
+      const occupancySurcharge = extraAdults * Number(selectedPlan.extraAdultFee || 0)
+        + safeChildren * Number(selectedPlan.extraChildFee || 0);
+      const nightlyTotal = baseWithMultipliers + occupancySurcharge;
+
+      pricing = {
+        currency: selectedPlan.currency,
+        baseRate,
+        weekendMultiplier: weekendMult,
+        seasonalMultiplier: seasonalMult,
+        occupancySurcharge: Number(occupancySurcharge.toFixed(2)),
+        suggestedNightlyTotal: Number(nightlyTotal.toFixed(2))
+      };
+    }
+
+    days.push({
+      date: dateStr,
+      status,
+      reason,
+      closedToArrival: availability.closedToArrival,
+      closedToDeparture: availability.closedToDeparture,
+      maxNightsConstraint: availability.maxNights,
+      minNightsConstraint: availability.minNights,
+      triggeredAvailabilityRuleIds: availability.matchingRuleIds,
+      reservationIds: bookedReservations.map((item) => item.id),
+      pricing
+    });
+  }
+
+  return res.json({
+    ok: true,
+    data: {
+      accommodationId,
+      dateFrom: formatIsoDateOnly(start),
+      dateTo: formatIsoDateOnly(end),
+      guests: { adults: safeAdults, children: safeChildren },
+      ratePlan: selectedPlan
+        ? { id: selectedPlan.id, name: selectedPlan.name, currency: selectedPlan.currency }
+        : null,
+      days
     }
   });
 });

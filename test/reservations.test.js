@@ -722,6 +722,227 @@ test('POST /api/rate-quote enforces min nights from availability rules', async (
   assert.equal(validStay.json.ok, true);
 });
 
+test('POST /api/rate-quote blocks closedToArrival and closedToDeparture', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa CTA CTD',
+      currency: 'EUR',
+      baseNightlyRate: 90
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-20',
+      endDate: '2026-12-20',
+      closedToArrival: true
+    },
+    token
+  );
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-22',
+      endDate: '2026-12-22',
+      closedToDeparture: true
+    },
+    token
+  );
+
+  const ctaBlocked = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-20',
+      checkOut: '2026-12-21'
+    },
+    token
+  );
+
+  const ctdBlocked = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-21',
+      checkOut: '2026-12-22'
+    },
+    token
+  );
+
+  assert.equal(ctaBlocked.status, 409);
+  assert.equal(ctdBlocked.status, 409);
+});
+
+test('POST /api/rate-quote enforces max nights from availability rules', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa MaxNights',
+      currency: 'EUR',
+      baseNightlyRate: 85
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-10',
+      endDate: '2026-12-31',
+      maxNights: 2
+    },
+    token
+  );
+
+  const tooLong = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-12',
+      checkOut: '2026-12-15'
+    },
+    token
+  );
+
+  const allowed = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-12',
+      checkOut: '2026-12-14'
+    },
+    token
+  );
+
+  assert.equal(tooLong.status, 400);
+  assert.equal(allowed.status, 200);
+});
+
+test('GET /api/availability-calendar returns booked and closed days', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Calendar',
+      currency: 'EUR',
+      baseNightlyRate: 90
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-21',
+      endDate: '2026-12-21',
+      closed: true
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Calendar',
+      checkIn: '2026-12-20',
+      checkOut: '2026-12-21'
+    },
+    token
+  );
+
+  const calendar = await request(
+    server,
+    'GET',
+    `/api/availability-calendar?accommodationId=acc_test_1&ratePlanId=${plan.json.data.id}&dateFrom=2026-12-20&dateTo=2026-12-21`,
+    null,
+    token
+  );
+
+  assert.equal(calendar.status, 200);
+  assert.equal(calendar.json.ok, true);
+  assert.equal(calendar.json.data.days[0].status, 'booked');
+  assert.equal(calendar.json.data.days[1].status, 'closed');
+});
+
+test('GET /api/availability-calendar includes suggested daily price', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Price Daily',
+      currency: 'EUR',
+      baseNightlyRate: 100,
+      weekendMultiplier: 1.2,
+      extraAdultFee: 10,
+      extraChildFee: 5,
+      seasonalAdjustments: [
+        { startDate: '2026-12-01', endDate: '2026-12-31', multiplier: 1.1 }
+      ]
+    },
+    token
+  );
+
+  const calendar = await request(
+    server,
+    'GET',
+    `/api/availability-calendar?accommodationId=acc_test_1&ratePlanId=${plan.json.data.id}&dateFrom=2026-12-05&dateTo=2026-12-05&adults=3&children=1`,
+    null,
+    token
+  );
+
+  assert.equal(calendar.status, 200);
+  assert.equal(calendar.json.ok, true);
+  assert.equal(calendar.json.data.days.length, 1);
+  assert.equal(calendar.json.data.days[0].status, 'available');
+  assert.equal(typeof calendar.json.data.days[0].closedToArrival, 'boolean');
+  assert.equal(typeof calendar.json.data.days[0].closedToDeparture, 'boolean');
+  assert.equal(calendar.json.data.days[0].pricing.suggestedNightlyTotal, 147);
+});
+
 test('POST /api/reservations creates valid reservation', async () => {
   const token = await loginAsAdmin(server);
   const response = await request(
