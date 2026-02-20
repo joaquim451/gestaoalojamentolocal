@@ -1,0 +1,19 @@
+﻿{
+  "name": "gestaoalojamentolocal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PMS + Channel Manager MVP para Alojamento Local em Portugal",
+  "main": "src/backend/server.js",
+  "scripts": {
+    "start": "node src/backend/server.js",
+    "dev": "node --watch src/backend/server.js",
+    "check": "node --check src/backend/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "morgan": "^1.10.0"
+  }
+}
