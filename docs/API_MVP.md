@@ -19,6 +19,36 @@ Base URL local: `http://localhost:3000`
 }
 ```
 
+## Reservas
+- `GET /api/reservations`
+  - filtros opcionais: `accommodationId`, `status`, `dateFrom`, `dateTo`
+- `POST /api/reservations`
+  - body mínimo:
+```json
+{
+  "accommodationId": "acc_123",
+  "guestName": "Maria Silva",
+  "checkIn": "2026-03-10",
+  "checkOut": "2026-03-14"
+}
+```
+  - campos opcionais: `adults`, `children`, `source`, `status`
+  - validações:
+    - `checkOut` tem de ser posterior a `checkIn`
+    - evita sobreposição de datas no mesmo alojamento (reservas `cancelled` não bloqueiam)
+- `PATCH /api/reservations/:id/status`
+  - body:
+```json
+{
+  "status": "cancelled"
+}
+```
+  - valores permitidos: `confirmed`, `cancelled`, `checked_in`, `checked_out`
+
+## Calendário Unificado (MVP)
+- `GET /api/calendar?accommodationId=acc_123&dateFrom=2026-03-01&dateTo=2026-03-31`
+- retorna reservas ativas do alojamento no intervalo (exclui `cancelled`)
+
 ## Booking API - Ligar/Desligar por Alojamento
 - `PATCH /api/accommodations/:id/booking-connection`
   - liga (com validação live):
