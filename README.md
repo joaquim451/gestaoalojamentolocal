@@ -27,9 +27,11 @@ Construir uma plataforma para proprietários e gestores de Alojamento Local em P
 - Persistência local em `data/db.json`.
 - Autenticação JWT simples com utilizador admin bootstrap via variáveis `AUTH_BOOTSTRAP_*`.
 - Proteção de login com lockout temporário após tentativas falhadas consecutivas.
+- Sessões com refresh token rotativo e logout com revogação de sessão.
 - Gestão de utilizadores com perfis `admin` e `manager` (endpoints admin-only para criar/listar).
 - Auditoria persistente de ações críticas (login, gestão de utilizadores, operações de reservas).
 - CRUD de alojamentos e controle de ligação Booking por alojamento.
+- Endpoints de configuração/sincronização Booking protegidos para perfil `admin`.
 - Endpoint de link para Livro de Reclamações.
 
 Ver detalhes em `docs/API_MVP.md`.

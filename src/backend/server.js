@@ -1,5 +1,6 @@
 const express = require('express');
 const morgan = require('morgan');
+const crypto = require('crypto');
 const { readDb, writeDb, nextId } = require('./store');
 const { getBookingConfig, pingBookingConnection, syncAccommodation } = require('./bookingClient');
 const { hashPassword, verifyPassword, createToken, verifyToken } = require('./auth');
@@ -11,6 +12,7 @@ const USER_ROLES = new Set(['admin', 'manager']);
 const AUTH_PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH || 10);
 const AUTH_LOGIN_MAX_ATTEMPTS = Number(process.env.AUTH_LOGIN_MAX_ATTEMPTS || 5);
 const AUTH_LOGIN_LOCK_MINUTES = Number(process.env.AUTH_LOGIN_LOCK_MINUTES || 15);
+const AUTH_REFRESH_TOKEN_TTL_DAYS = Number(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS || 30);
 
 app.use(express.json());
 app.use(morgan('dev'));
@@ -38,6 +40,12 @@ function normalizeAuditLogsCollection(db) {
   }
 }
 
+function normalizeAuthSessionsCollection(db) {
+  if (!Array.isArray(db.authSessions)) {
+    db.authSessions = [];
+  }
+}
+
 function normalizeDomainCollections(db) {
   if (!Array.isArray(db.accommodations)) {
     db.accommodations = [];
@@ -45,6 +53,51 @@ function normalizeDomainCollections(db) {
   if (!Array.isArray(db.reservations)) {
     db.reservations = [];
   }
+}
+
+function buildOpaqueToken() {
+  return crypto.randomBytes(48).toString('base64url');
+}
+
+function hashOpaqueToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+function createRefreshSession(db, userId) {
+  normalizeAuthSessionsCollection(db);
+  const refreshToken = buildOpaqueToken();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + AUTH_REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+
+  const session = {
+    id: nextId('sess'),
+    userId,
+    tokenHash: hashOpaqueToken(refreshToken),
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    lastUsedAt: null,
+    expiresAt: expiresAt.toISOString(),
+    revokedAt: null
+  };
+
+  db.authSessions.push(session);
+  return { refreshToken, session };
+}
+
+function findActiveSessionByRefreshToken(db, refreshToken) {
+  normalizeAuthSessionsCollection(db);
+  const tokenHash = hashOpaqueToken(refreshToken);
+  const session = db.authSessions.find((item) => item.tokenHash === tokenHash);
+  if (!session) {
+    return { ok: false, error: 'Sessao nao encontrada.' };
+  }
+  if (session.revokedAt) {
+    return { ok: false, error: 'Sessao revogada.' };
+  }
+  if (new Date(session.expiresAt) <= new Date()) {
+    return { ok: false, error: 'Sessao expirada.' };
+  }
+  return { ok: true, session };
 }
 
 function appendAuditLog(db, event) {
@@ -196,19 +249,78 @@ app.post('/api/auth/login', (req, res) => {
   user.updatedAt = new Date().toISOString();
 
   const token = createToken({ sub: user.id, email: user.email, role: user.role });
+  const { refreshToken, session } = createRefreshSession(db, user.id);
   appendAuditLog(db, {
     action: 'auth.login.success',
     actor: { userId: user.id, email: user.email, role: user.role },
     target: { type: 'user', id: user.id },
-    metadata: { bootstrapAdminCreated: Boolean(bootstrapUser) }
+    metadata: { bootstrapAdminCreated: Boolean(bootstrapUser), sessionId: session.id }
   });
   writeDb(db);
 
-  return res.json({ ok: true, token, user: serializeUser(user) });
+  return res.json({ ok: true, token, refreshToken, user: serializeUser(user) });
+});
+
+app.post('/api/auth/refresh', (req, res) => {
+  const { refreshToken } = req.body || {};
+  if (!refreshToken) {
+    return res.status(400).json({ ok: false, error: 'Campo obrigatorio: refreshToken' });
+  }
+
+  const db = readDb();
+  normalizeUsersCollection(db);
+  const sessionResult = findActiveSessionByRefreshToken(db, refreshToken);
+  if (!sessionResult.ok) {
+    appendAuditLog(db, {
+      action: 'auth.refresh.failed',
+      actor: { userId: null, email: null, role: null },
+      target: null,
+      metadata: { reason: sessionResult.error }
+    });
+    writeDb(db);
+    return res.status(401).json({ ok: false, error: 'Refresh token invalido.' });
+  }
+
+  const oldSession = sessionResult.session;
+  const user = db.users.find((item) => item.id === oldSession.userId);
+  if (!user) {
+    oldSession.revokedAt = new Date().toISOString();
+    oldSession.updatedAt = oldSession.revokedAt;
+    appendAuditLog(db, {
+      action: 'auth.refresh.failed',
+      actor: { userId: oldSession.userId, email: null, role: null },
+      target: { type: 'session', id: oldSession.id },
+      metadata: { reason: 'user_not_found' }
+    });
+    writeDb(db);
+    return res.status(401).json({ ok: false, error: 'Refresh token invalido.' });
+  }
+
+  oldSession.revokedAt = new Date().toISOString();
+  oldSession.updatedAt = oldSession.revokedAt;
+  oldSession.lastUsedAt = oldSession.revokedAt;
+
+  const { refreshToken: nextRefreshToken, session: nextSession } = createRefreshSession(db, user.id);
+  const token = createToken({ sub: user.id, email: user.email, role: user.role });
+
+  appendAuditLog(db, {
+    action: 'auth.refresh.success',
+    actor: { userId: user.id, email: user.email, role: user.role },
+    target: { type: 'session', id: nextSession.id },
+    metadata: { rotatedFromSessionId: oldSession.id }
+  });
+  writeDb(db);
+
+  return res.json({
+    ok: true,
+    token,
+    refreshToken: nextRefreshToken,
+    user: serializeUser(user)
+  });
 });
 
 app.use('/api', (req, res, next) => {
-  if (req.path === '/auth/login') {
+  if (req.path === '/auth/login' || req.path === '/auth/refresh') {
     return next();
   }
   return authRequired(req, res, next);
@@ -248,15 +360,73 @@ app.post('/api/auth/change-password', (req, res) => {
   user.passwordHash = hashPassword(newPassword);
   user.updatedAt = new Date().toISOString();
   db.users[index] = user;
+
+  normalizeAuthSessionsCollection(db);
+  let revokedSessions = 0;
+  const now = new Date().toISOString();
+  db.authSessions.forEach((session) => {
+    if (session.userId === user.id && !session.revokedAt) {
+      session.revokedAt = now;
+      session.updatedAt = now;
+      revokedSessions += 1;
+    }
+  });
+
   appendAuditLog(db, {
     action: 'auth.change_password',
     actor: { userId: user.id, email: user.email, role: user.role },
     target: { type: 'user', id: user.id },
-    metadata: null
+    metadata: { revokedSessions }
   });
   writeDb(db);
 
   return res.json({ ok: true, message: 'Password atualizada com sucesso.' });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const { refreshToken, allSessions } = req.body || {};
+  const db = readDb();
+  normalizeAuthSessionsCollection(db);
+
+  const revokeAll = Boolean(allSessions);
+  let revokedCount = 0;
+
+  if (revokeAll) {
+    const now = new Date().toISOString();
+    db.authSessions.forEach((session) => {
+      if (session.userId === req.auth.userId && !session.revokedAt) {
+        session.revokedAt = now;
+        session.updatedAt = now;
+        revokedCount += 1;
+      }
+    });
+  } else {
+    if (!refreshToken) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Campo obrigatorio: refreshToken (ou use allSessions=true)'
+      });
+    }
+
+    const sessionResult = findActiveSessionByRefreshToken(db, refreshToken);
+    if (!sessionResult.ok || sessionResult.session.userId !== req.auth.userId) {
+      return res.status(401).json({ ok: false, error: 'Refresh token invalido.' });
+    }
+
+    sessionResult.session.revokedAt = new Date().toISOString();
+    sessionResult.session.updatedAt = sessionResult.session.revokedAt;
+    revokedCount = 1;
+  }
+
+  appendAuditLog(db, {
+    action: 'auth.logout',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'user', id: req.auth.userId },
+    metadata: { allSessions: revokeAll, revokedCount }
+  });
+  writeDb(db);
+
+  return res.json({ ok: true, message: 'Logout concluido.', revokedCount });
 });
 
 app.get('/api/users', requireRole('admin'), (req, res) => {
@@ -339,7 +509,7 @@ app.get('/api/audit-logs', requireRole('admin'), (req, res) => {
   return res.json({ ok: true, data });
 });
 
-app.get('/api/config/booking', (req, res) => {
+app.get('/api/config/booking', requireRole('admin'), (req, res) => {
   res.json({ ok: true, booking: getBookingConfig() });
 });
 
@@ -749,7 +919,7 @@ app.get('/api/calendar', (req, res) => {
   return res.json({ ok: true, data: { accommodationId, dateFrom, dateTo, reservations } });
 });
 
-app.patch('/api/accommodations/:id/booking-connection', async (req, res) => {
+app.patch('/api/accommodations/:id/booking-connection', requireRole('admin'), async (req, res) => {
   const { enabled, hotelId, force } = req.body || {};
   if (typeof enabled !== 'boolean') {
     return res.status(400).json({ ok: false, error: 'Campo obrigatorio: enabled (boolean)' });
@@ -795,7 +965,7 @@ app.patch('/api/accommodations/:id/booking-connection', async (req, res) => {
   return res.json({ ok: true, data: accommodation.bookingConnection, warning: check.ok ? null : check.message });
 });
 
-app.post('/api/accommodations/:id/booking-sync', async (req, res) => {
+app.post('/api/accommodations/:id/booking-sync', requireRole('admin'), async (req, res) => {
   const db = readDb();
   normalizeDomainCollections(db);
   const index = db.accommodations.findIndex((item) => item.id === req.params.id);

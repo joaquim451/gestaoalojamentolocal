@@ -44,7 +44,8 @@ function resetDb() {
       }
     ],
     reservations: [],
-    auditLogs: []
+    auditLogs: [],
+    authSessions: []
   };
 
   fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2), 'utf8');
@@ -87,6 +88,30 @@ async function login(server, email, password) {
   return response.json.token;
 }
 
+async function loginWithTokens(server, email, password) {
+  const response = await request(server, 'POST', '/api/auth/login', { email, password });
+  assert.equal(response.status, 200);
+  assert.equal(response.json.ok, true);
+  return { token: response.json.token, refreshToken: response.json.refreshToken };
+}
+
+async function createManagerAndLogin(server, email) {
+  const adminToken = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/users',
+    {
+      name: 'Gestor Permissoes',
+      email,
+      password: 'manager-password-123',
+      role: 'manager'
+    },
+    adminToken
+  );
+  return login(server, email, 'manager-password-123');
+}
+
 let server;
 
 test.beforeEach(() => {
@@ -113,6 +138,7 @@ test('POST /api/auth/login returns token and user', async () => {
   assert.equal(response.status, 200);
   assert.equal(response.json.ok, true);
   assert.equal(typeof response.json.token, 'string');
+  assert.equal(typeof response.json.refreshToken, 'string');
   assert.equal(response.json.user.email, process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL);
 });
 
@@ -132,6 +158,85 @@ test('POST /api/auth/login locks account after max failed attempts', async () =>
 
   assert.equal(blocked.status, 423);
   assert.equal(blocked.json.ok, false);
+});
+
+test('POST /api/auth/refresh rotates refresh token', async () => {
+  const loginResult = await request(server, 'POST', '/api/auth/login', {
+    email: process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    password: process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
+  });
+
+  const refreshed = await request(server, 'POST', '/api/auth/refresh', {
+    refreshToken: loginResult.json.refreshToken
+  });
+
+  const reusedOld = await request(server, 'POST', '/api/auth/refresh', {
+    refreshToken: loginResult.json.refreshToken
+  });
+
+  assert.equal(refreshed.status, 200);
+  assert.equal(refreshed.json.ok, true);
+  assert.equal(typeof refreshed.json.token, 'string');
+  assert.equal(typeof refreshed.json.refreshToken, 'string');
+  assert.equal(refreshed.json.refreshToken === loginResult.json.refreshToken, false);
+  assert.equal(reusedOld.status, 401);
+});
+
+test('POST /api/auth/logout revokes provided refresh token', async () => {
+  const session = await loginWithTokens(
+    server,
+    process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
+  );
+
+  const logout = await request(
+    server,
+    'POST',
+    '/api/auth/logout',
+    { refreshToken: session.refreshToken },
+    session.token
+  );
+  const refreshAfterLogout = await request(server, 'POST', '/api/auth/refresh', {
+    refreshToken: session.refreshToken
+  });
+
+  assert.equal(logout.status, 200);
+  assert.equal(logout.json.ok, true);
+  assert.equal(refreshAfterLogout.status, 401);
+});
+
+test('POST /api/auth/logout with allSessions revokes every session', async () => {
+  const first = await loginWithTokens(
+    server,
+    process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
+  );
+  const second = await loginWithTokens(
+    server,
+    process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
+  );
+
+  const logoutAll = await request(
+    server,
+    'POST',
+    '/api/auth/logout',
+    { allSessions: true },
+    first.token
+  );
+
+  const refreshFirst = await request(server, 'POST', '/api/auth/refresh', {
+    refreshToken: first.refreshToken
+  });
+  const refreshSecond = await request(server, 'POST', '/api/auth/refresh', {
+    refreshToken: second.refreshToken
+  });
+
+  assert.equal(logoutAll.status, 200);
+  assert.equal(logoutAll.json.ok, true);
+  assert.equal(logoutAll.json.revokedCount >= 2, true);
+  assert.equal(refreshFirst.status, 401);
+  assert.equal(refreshSecond.status, 401);
 });
 
 test('POST /api/auth/change-password updates credentials', async () => {
@@ -221,6 +326,26 @@ test('GET /api/users blocks manager role', async () => {
 
   assert.equal(usersList.status, 403);
   assert.equal(usersList.json.ok, false);
+});
+
+test('GET /api/config/booking blocks manager role', async () => {
+  const managerToken = await createManagerAndLogin(server, 'gestor-config@test.local');
+  const response = await request(server, 'GET', '/api/config/booking', null, managerToken);
+  assert.equal(response.status, 403);
+  assert.equal(response.json.ok, false);
+});
+
+test('PATCH /api/accommodations/:id/booking-connection blocks manager role', async () => {
+  const managerToken = await createManagerAndLogin(server, 'gestor-booking@test.local');
+  const response = await request(
+    server,
+    'PATCH',
+    '/api/accommodations/acc_test_1/booking-connection',
+    { enabled: false },
+    managerToken
+  );
+  assert.equal(response.status, 403);
+  assert.equal(response.json.ok, false);
 });
 
 test('GET /api/audit-logs returns critical events for admin', async () => {

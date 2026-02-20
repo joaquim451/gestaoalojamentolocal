@@ -22,7 +22,25 @@ Base URL local: `http://localhost:3000`
   "newPassword": "new-strong-password-123"
 }
 ```
-- Todos os endpoints `/api/*` exceto `/api/auth/login` requerem header:
+- `POST /api/auth/refresh`
+```json
+{
+  "refreshToken": "opaque-refresh-token"
+}
+```
+- `POST /api/auth/logout` (requer Bearer token)
+```json
+{
+  "refreshToken": "opaque-refresh-token"
+}
+```
+ou
+```json
+{
+  "allSessions": true
+}
+```
+- Todos os endpoints `/api/*` exceto `/api/auth/login` e `/api/auth/refresh` requerem header:
   - `Authorization: Bearer <token>`
 
 ## Utilizadores
@@ -44,7 +62,7 @@ Base URL local: `http://localhost:3000`
   - devolve eventos por ordem mais recente primeiro
 
 ## Configuração Booking
-- `GET /api/config/booking`
+- `GET /api/config/booking` (apenas role `admin`)
 - Retorna apenas metadados (sem password), incluindo `hasCredentials`.
 
 ## Alojamentos
@@ -100,7 +118,7 @@ Base URL local: `http://localhost:3000`
 - retorna reservas ativas do alojamento no intervalo (exclui `cancelled`)
 
 ## Booking API - Ligar/Desligar por Alojamento
-- `PATCH /api/accommodations/:id/booking-connection`
+- `PATCH /api/accommodations/:id/booking-connection` (apenas role `admin`)
   - liga (com validação live):
 ```json
 {
@@ -129,7 +147,7 @@ Regras:
 - O estado fica persistido por alojamento.
 
 ## Booking API - Sincronização Real (HTTP)
-- `POST /api/accommodations/:id/booking-sync`
+- `POST /api/accommodations/:id/booking-sync` (apenas role `admin`)
 - O corpo enviado é repassado para o endpoint configurado de sync.
 - Se vazio, backend envia payload default (`hotelId`, `timestamp`) em JSON ou XML conforme config.
 
@@ -142,6 +160,7 @@ Regras:
 - `AUTH_PASSWORD_MIN_LENGTH`
 - `AUTH_LOGIN_MAX_ATTEMPTS`
 - `AUTH_LOGIN_LOCK_MINUTES`
+- `AUTH_REFRESH_TOKEN_TTL_DAYS`
 - `AUTH_BOOTSTRAP_ADMIN_NAME`
 - `AUTH_BOOTSTRAP_ADMIN_EMAIL`
 - `AUTH_BOOTSTRAP_ADMIN_PASSWORD`
