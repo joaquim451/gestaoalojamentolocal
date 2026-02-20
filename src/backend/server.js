@@ -59,6 +59,18 @@ function pickSeasonalMultiplier(seasonalAdjustments, dateStr) {
   return 1;
 }
 
+function pickAvailabilityConstraints(availabilityRules, accommodationId, dateStr) {
+  const matching = (availabilityRules || []).filter((item) => {
+    return item.accommodationId === accommodationId && dateStr >= item.startDate && dateStr <= item.endDate;
+  });
+
+  return {
+    closed: matching.some((item) => Boolean(item.closed)),
+    minNights: matching.reduce((acc, item) => Math.max(acc, Number(item.minNights) || 0), 0),
+    matchingRuleIds: matching.map((item) => item.id)
+  };
+}
+
 function normalizeUsersCollection(db) {
   if (!Array.isArray(db.users)) {
     db.users = [];
@@ -86,6 +98,9 @@ function normalizeDomainCollections(db) {
   }
   if (!Array.isArray(db.ratePlans)) {
     db.ratePlans = [];
+  }
+  if (!Array.isArray(db.availabilityRules)) {
+    db.availabilityRules = [];
   }
 }
 
@@ -854,6 +869,78 @@ app.post('/api/rate-plans', (req, res) => {
   return res.status(201).json({ ok: true, data: plan });
 });
 
+app.get('/api/availability-rules', (req, res) => {
+  const { accommodationId, page, pageSize, sortBy, sortDir } = req.query || {};
+  const db = readDb();
+  normalizeDomainCollections(db);
+
+  let data = db.availabilityRules;
+  if (accommodationId) {
+    data = data.filter((item) => item.accommodationId === accommodationId);
+  }
+
+  const allowedSortFields = new Set(['startDate', 'endDate', 'createdAt', 'updatedAt']);
+  const selectedSortBy = allowedSortFields.has(sortBy) ? sortBy : 'startDate';
+  const selectedSortDir = parseSortDir(sortDir, 'asc');
+  const selectedPage = parsePositiveInt(page, 1, 1, 100000);
+  const selectedPageSize = parsePositiveInt(pageSize, 50, 1, 200);
+
+  const sorted = sortItems(data, selectedSortBy, selectedSortDir);
+  const paginated = paginateItems(sorted, selectedPage, selectedPageSize);
+  return res.json({
+    ok: true,
+    data: paginated.data,
+    meta: { ...paginated.meta, sortBy: selectedSortBy, sortDir: selectedSortDir }
+  });
+});
+
+app.post('/api/availability-rules', (req, res) => {
+  const { accommodationId, startDate, endDate, closed, minNights, note } = req.body || {};
+  if (!accommodationId || !startDate || !endDate) {
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: accommodationId, startDate, endDate' });
+  }
+  if (!isValidIsoDate(startDate) || !isValidIsoDate(endDate) || new Date(startDate) > new Date(endDate)) {
+    return res.status(400).json({ ok: false, error: 'Intervalo de datas invalido.' });
+  }
+
+  const db = readDb();
+  normalizeDomainCollections(db);
+  const accommodation = db.accommodations.find((item) => item.id === accommodationId);
+  if (!accommodation) {
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
+  }
+
+  const normalizedMinNights = Number.isFinite(Number(minNights)) ? Number(minNights) : 0;
+  const rule = {
+    id: nextId('ar'),
+    accommodationId,
+    startDate: formatIsoDateOnly(startDate),
+    endDate: formatIsoDateOnly(endDate),
+    closed: Boolean(closed),
+    minNights: Math.max(normalizedMinNights, 0),
+    note: note || null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  db.availabilityRules.push(rule);
+  appendAuditLog(db, {
+    action: 'availability_rules.create',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'availability_rule', id: rule.id },
+    metadata: {
+      accommodationId: rule.accommodationId,
+      startDate: rule.startDate,
+      endDate: rule.endDate,
+      closed: rule.closed,
+      minNights: rule.minNights
+    }
+  });
+  writeDb(db);
+
+  return res.status(201).json({ ok: true, data: rule });
+});
+
 app.post('/api/rate-quote', (req, res) => {
   const { accommodationId, ratePlanId, checkIn, checkOut, adults, children } = req.body || {};
   if (!accommodationId || !checkIn || !checkOut) {
@@ -883,18 +970,29 @@ app.post('/api/rate-quote', (req, res) => {
   }
 
   const nights = countNights(checkIn, checkOut);
-  if (nights < Number(plan.minNights || 1)) {
-    return res.status(400).json({ ok: false, error: `Estadia minima: ${plan.minNights} noites.` });
-  }
+  const minNightsFromPlan = Number(plan.minNights || 1);
 
   const safeAdults = Number.isFinite(Number(adults)) ? Number(adults) : 1;
   const safeChildren = Number.isFinite(Number(children)) ? Number(children) : 0;
   const perNightDetails = [];
   let subtotal = 0;
+  let minNightsFromRules = 0;
+  const triggeredRuleIds = new Set();
 
   for (let i = 0; i < nights; i += 1) {
     const date = addDays(checkIn, i);
     const dateStr = formatIsoDateOnly(date);
+    const availability = pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr);
+    if (availability.closed) {
+      return res.status(409).json({
+        ok: false,
+        error: `Data indisponivel para reserva: ${dateStr}.`,
+        details: { date: dateStr, matchingRuleIds: availability.matchingRuleIds }
+      });
+    }
+    minNightsFromRules = Math.max(minNightsFromRules, availability.minNights);
+    availability.matchingRuleIds.forEach((id) => triggeredRuleIds.add(id));
+
     const dayOfWeek = date.getUTCDay();
     const isWeekend = dayOfWeek === 5 || dayOfWeek === 6;
     const weekendMult = isWeekend ? Number(plan.weekendMultiplier || 1) : 1;
@@ -908,7 +1006,17 @@ app.post('/api/rate-quote', (req, res) => {
       baseRate: base,
       weekendMultiplier: weekendMult,
       seasonalMultiplier: seasonalMult,
+      minNightsConstraint: availability.minNights,
       nightlyRate: Number(nightlyRate.toFixed(2))
+    });
+  }
+
+  const effectiveMinNights = Math.max(minNightsFromPlan, minNightsFromRules || 0);
+  if (nights < effectiveMinNights) {
+    return res.status(400).json({
+      ok: false,
+      error: `Estadia minima: ${effectiveMinNights} noites.`,
+      details: { minNightsFromPlan, minNightsFromRules, nights }
     });
   }
 
@@ -930,6 +1038,12 @@ app.post('/api/rate-quote', (req, res) => {
       checkOut,
       nights,
       guests: { adults: safeAdults, children: safeChildren },
+      constraints: {
+        minNightsFromPlan,
+        minNightsFromRules,
+        effectiveMinNights,
+        triggeredAvailabilityRuleIds: [...triggeredRuleIds]
+      },
       perNightDetails,
       pricing: {
         subtotal: Number(subtotal.toFixed(2)),

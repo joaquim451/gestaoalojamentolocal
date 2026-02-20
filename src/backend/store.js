@@ -10,7 +10,15 @@ function getDbPath() {
 function ensureDb() {
   const dbPath = getDbPath();
   if (!fs.existsSync(dbPath)) {
-    const initial = { users: [], accommodations: [], reservations: [], ratePlans: [], auditLogs: [], authSessions: [] };
+    const initial = {
+      users: [],
+      accommodations: [],
+      reservations: [],
+      ratePlans: [],
+      availabilityRules: [],
+      auditLogs: [],
+      authSessions: []
+    };
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     fs.writeFileSync(dbPath, JSON.stringify(initial, null, 2), 'utf8');
   }

@@ -33,6 +33,7 @@ Construir uma plataforma para proprietários e gestores de Alojamento Local em P
 - CRUD de alojamentos e controle de ligação Booking por alojamento.
 - Endpoints de configuração/sincronização Booking protegidos para perfil `admin`.
 - Módulo inicial de rate plans com cotação dinâmica por noite (fim de semana/sazonalidade).
+- Regras de disponibilidade (blackout dates e estadia mínima por período) integradas na cotação.
 - Endpoint de link para Livro de Reclamações.
 
 Ver detalhes em `docs/API_MVP.md`.

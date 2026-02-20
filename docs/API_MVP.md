@@ -118,6 +118,25 @@ ou
 }
 ```
 
+## Regras de Disponibilidade
+- `GET /api/availability-rules`
+  - filtros opcionais: `accommodationId`
+  - paginação/ordenação opcionais: `page`, `pageSize`, `sortBy`, `sortDir`
+- `POST /api/availability-rules`
+```json
+{
+  "accommodationId": "acc_123",
+  "startDate": "2026-12-24",
+  "endDate": "2026-12-26",
+  "closed": true,
+  "minNights": 0,
+  "note": "Natal fechado"
+}
+```
+- Efeito no `POST /api/rate-quote`:
+  - bloqueia cotação em datas `closed=true` (`HTTP 409`)
+  - aplica estadia mínima por período (`minNights`)
+
 ## Reservas
 - `GET /api/reservations`
   - filtros opcionais: `accommodationId`, `status`, `dateFrom`, `dateTo`

@@ -44,6 +44,8 @@ function resetDb() {
       }
     ],
     reservations: [],
+    ratePlans: [],
+    availabilityRules: [],
     auditLogs: [],
     authSessions: []
   };
@@ -603,6 +605,121 @@ test('POST /api/rate-quote calculates dynamic total', async () => {
   assert.equal(quote.json.ok, true);
   assert.equal(quote.json.data.nights, 2);
   assert.equal(quote.json.data.pricing.total, 294);
+});
+
+test('POST /api/rate-quote blocks blackout dates from availability rules', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Blackout',
+      currency: 'EUR',
+      baseNightlyRate: 90
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-24',
+      endDate: '2026-12-26',
+      closed: true,
+      note: 'Natal fechado'
+    },
+    token
+  );
+
+  const quote = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-24',
+      checkOut: '2026-12-26',
+      adults: 2,
+      children: 0
+    },
+    token
+  );
+
+  assert.equal(quote.status, 409);
+  assert.equal(quote.json.ok, false);
+});
+
+test('POST /api/rate-quote enforces min nights from availability rules', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa MinNights',
+      currency: 'EUR',
+      baseNightlyRate: 80,
+      minNights: 1
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-10',
+      endDate: '2026-12-31',
+      closed: false,
+      minNights: 3,
+      note: 'Epoca alta'
+    },
+    token
+  );
+
+  const shortStay = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-12',
+      checkOut: '2026-12-14',
+      adults: 2,
+      children: 0
+    },
+    token
+  );
+
+  const validStay = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-12',
+      checkOut: '2026-12-15',
+      adults: 2,
+      children: 0
+    },
+    token
+  );
+
+  assert.equal(shortStay.status, 400);
+  assert.equal(shortStay.json.ok, false);
+  assert.equal(validStay.status, 200);
+  assert.equal(validStay.json.ok, true);
 });
 
 test('POST /api/reservations creates valid reservation', async () => {
