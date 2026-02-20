@@ -44,6 +44,12 @@ Base URL local: `http://localhost:3000`
 }
 ```
   - valores permitidos: `confirmed`, `cancelled`, `checked_in`, `checked_out`
+- `GET /api/reservations/:id`
+- `PUT /api/reservations/:id`
+  - permite atualizar: `guestName`, `checkIn`, `checkOut`, `adults`, `children`, `source`, `status`
+  - mantém validações de datas e sobreposição
+- `DELETE /api/reservations/:id`
+  - remove reserva do registo local
 
 ## Calendário Unificado (MVP)
 - `GET /api/calendar?accommodationId=acc_123&dateFrom=2026-03-01&dateTo=2026-03-31`

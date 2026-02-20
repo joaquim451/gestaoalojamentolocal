@@ -1,13 +1,18 @@
-﻿const fs = require('fs');
+const fs = require('fs');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, '..', '..', 'data', 'db.json');
+const DEFAULT_DB_PATH = path.join(__dirname, '..', '..', 'data', 'db.json');
+
+function getDbPath() {
+  return process.env.DB_PATH || DEFAULT_DB_PATH;
+}
 
 function ensureDb() {
-  if (!fs.existsSync(DB_PATH)) {
+  const dbPath = getDbPath();
+  if (!fs.existsSync(dbPath)) {
     const initial = { accommodations: [], reservations: [] };
-    fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-    fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2), 'utf8');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    fs.writeFileSync(dbPath, JSON.stringify(initial, null, 2), 'utf8');
   }
 }
 
@@ -18,12 +23,14 @@ function parseJsonFile(content) {
 }
 
 function readDb() {
+  const dbPath = getDbPath();
   ensureDb();
-  return parseJsonFile(fs.readFileSync(DB_PATH, 'utf8'));
+  return parseJsonFile(fs.readFileSync(dbPath, 'utf8'));
 }
 
 function writeDb(data) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
+  const dbPath = getDbPath();
+  fs.writeFileSync(dbPath, JSON.stringify(data, null, 2), 'utf8');
 }
 
 function nextId(prefix) {

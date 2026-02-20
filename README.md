@@ -30,6 +30,10 @@ Construir uma plataforma para proprietários e gestores de Alojamento Local em P
 
 Ver detalhes em `docs/API_MVP.md`.
 
+## Testes
+- `npm test` para correr testes automáticos do backend (Node test runner).
+- `npm run check` para validação rápida de sintaxe.
+
 ## Checklist: Troca de PC
 Fluxo recomendado para continuar trabalho noutro computador sem perder alterações.
 

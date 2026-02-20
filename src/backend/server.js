@@ -187,6 +187,94 @@ app.post('/api/reservations', (req, res) => {
   return res.status(201).json({ ok: true, data: reservation });
 });
 
+app.get('/api/reservations/:id', (req, res) => {
+  const db = readDb();
+  const reservation = db.reservations.find((item) => item.id === req.params.id);
+
+  if (!reservation) {
+    return res.status(404).json({ ok: false, error: 'Reserva não encontrada' });
+  }
+
+  return res.json({ ok: true, data: reservation });
+});
+
+app.put('/api/reservations/:id', (req, res) => {
+  const {
+    guestName,
+    checkIn,
+    checkOut,
+    adults,
+    children,
+    source,
+    status
+  } = req.body || {};
+  const db = readDb();
+  const index = db.reservations.findIndex((item) => item.id === req.params.id);
+
+  if (index === -1) {
+    return res.status(404).json({ ok: false, error: 'Reserva não encontrada' });
+  }
+
+  const current = db.reservations[index];
+  const nextGuestName = guestName || current.guestName;
+  const nextCheckIn = checkIn || current.checkIn;
+  const nextCheckOut = checkOut || current.checkOut;
+  const nextStatus = status || current.status;
+
+  if (!nextGuestName || !nextCheckIn || !nextCheckOut) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Campos obrigatórios: guestName, checkIn, checkOut'
+    });
+  }
+
+  if (!isValidIsoDate(nextCheckIn) || !isValidIsoDate(nextCheckOut)) {
+    return res.status(400).json({ ok: false, error: 'checkIn/checkOut inválidos. Use formato ISO (YYYY-MM-DD).' });
+  }
+
+  if (new Date(nextCheckIn) >= new Date(nextCheckOut)) {
+    return res.status(400).json({ ok: false, error: 'checkOut deve ser posterior a checkIn.' });
+  }
+
+  if (!RESERVATION_STATUSES.has(nextStatus)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'status inválido. Valores permitidos: confirmed, cancelled, checked_in, checked_out'
+    });
+  }
+
+  const hasConflict = db.reservations.some((item) => {
+    if (item.id === current.id || item.accommodationId !== current.accommodationId) {
+      return false;
+    }
+    if (item.status === 'cancelled' || nextStatus === 'cancelled') {
+      return false;
+    }
+    return hasDateRangeOverlap(item.checkIn, item.checkOut, nextCheckIn, nextCheckOut);
+  });
+
+  if (hasConflict) {
+    return res.status(409).json({ ok: false, error: 'Conflito de datas: já existe reserva para este intervalo.' });
+  }
+
+  const updatedReservation = {
+    ...current,
+    guestName: nextGuestName,
+    checkIn: nextCheckIn,
+    checkOut: nextCheckOut,
+    adults: Number.isFinite(Number(adults)) ? Number(adults) : current.adults,
+    children: Number.isFinite(Number(children)) ? Number(children) : current.children,
+    source: source || current.source,
+    status: nextStatus,
+    updatedAt: new Date().toISOString()
+  };
+
+  db.reservations[index] = updatedReservation;
+  writeDb(db);
+
+  return res.json({ ok: true, data: updatedReservation });
+});
+
 app.patch('/api/reservations/:id/status', (req, res) => {
   const { status } = req.body || {};
 
@@ -212,6 +300,20 @@ app.patch('/api/reservations/:id/status', (req, res) => {
   writeDb(db);
 
   return res.json({ ok: true, data: reservation });
+});
+
+app.delete('/api/reservations/:id', (req, res) => {
+  const db = readDb();
+  const index = db.reservations.findIndex((item) => item.id === req.params.id);
+
+  if (index === -1) {
+    return res.status(404).json({ ok: false, error: 'Reserva não encontrada' });
+  }
+
+  const [removed] = db.reservations.splice(index, 1);
+  writeDb(db);
+
+  return res.json({ ok: true, data: removed, message: 'Reserva removida com sucesso.' });
 });
 
 app.get('/api/calendar', (req, res) => {
@@ -341,7 +443,11 @@ app.use((req, res) => {
   return res.status(404).json({ ok: false, error: 'Endpoint não encontrado' });
 });
 
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`API online em http://localhost:${port}`);
-});
+if (require.main === module) {
+  app.listen(port, () => {
+    // eslint-disable-next-line no-console
+    console.log(`API online em http://localhost:${port}`);
+  });
+}
+
+module.exports = { app };
