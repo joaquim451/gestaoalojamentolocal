@@ -13,6 +13,7 @@ Base URL local: `http://localhost:3000`
   "password": "change-me-now"
 }
 ```
+- Após tentativas falhadas consecutivas, a conta fica temporariamente bloqueada (`HTTP 423`).
 - `GET /api/auth/me` (requer Bearer token)
 - `POST /api/auth/change-password` (requer Bearer token)
 ```json
@@ -55,6 +56,12 @@ Base URL local: `http://localhost:3000`
   "name": "Apartamento Alfama"
 }
 ```
+- `GET /api/accommodations/:id`
+- `PUT /api/accommodations/:id`
+  - permite atualizar: `name`, `city`, `municipality`, `localRegistrationNumber`
+- `DELETE /api/accommodations/:id`
+  - bloqueia se existirem reservas ativas
+  - para remoção forçada (e apagar reservas associadas): `DELETE /api/accommodations/:id?force=true`
 
 ## Reservas
 - `GET /api/reservations`
@@ -133,6 +140,8 @@ Regras:
 - `AUTH_JWT_SECRET`
 - `AUTH_TOKEN_TTL_SECONDS`
 - `AUTH_PASSWORD_MIN_LENGTH`
+- `AUTH_LOGIN_MAX_ATTEMPTS`
+- `AUTH_LOGIN_LOCK_MINUTES`
 - `AUTH_BOOTSTRAP_ADMIN_NAME`
 - `AUTH_BOOTSTRAP_ADMIN_EMAIL`
 - `AUTH_BOOTSTRAP_ADMIN_PASSWORD`

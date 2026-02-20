@@ -12,6 +12,8 @@ process.env.AUTH_JWT_SECRET = 'test-secret';
 process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL = 'admin@test.local';
 process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD = 'test-password-123';
 process.env.AUTH_BOOTSTRAP_ADMIN_NAME = 'Test Admin';
+process.env.AUTH_LOGIN_MAX_ATTEMPTS = '3';
+process.env.AUTH_LOGIN_LOCK_MINUTES = '5';
 
 const { app } = require('../src/backend/server');
 
@@ -112,6 +114,24 @@ test('POST /api/auth/login returns token and user', async () => {
   assert.equal(response.json.ok, true);
   assert.equal(typeof response.json.token, 'string');
   assert.equal(response.json.user.email, process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL);
+});
+
+test('POST /api/auth/login locks account after max failed attempts', async () => {
+  for (let i = 0; i < 3; i += 1) {
+    const failed = await request(server, 'POST', '/api/auth/login', {
+      email: process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+      password: `wrong-password-${i}`
+    });
+    assert.equal(failed.status, 401);
+  }
+
+  const blocked = await request(server, 'POST', '/api/auth/login', {
+    email: process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    password: process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
+  });
+
+  assert.equal(blocked.status, 423);
+  assert.equal(blocked.json.ok, false);
 });
 
 test('POST /api/auth/change-password updates credentials', async () => {
@@ -246,6 +266,70 @@ test('GET /api/audit-logs blocks manager role', async () => {
   const response = await request(server, 'GET', '/api/audit-logs', null, managerToken);
   assert.equal(response.status, 403);
   assert.equal(response.json.ok, false);
+});
+
+test('PUT /api/accommodations/:id updates accommodation fields', async () => {
+  const token = await loginAsAdmin(server);
+  const updated = await request(
+    server,
+    'PUT',
+    '/api/accommodations/acc_test_1',
+    {
+      name: 'Alojamento Teste Atualizado',
+      city: 'Porto',
+      municipality: 'Porto',
+      localRegistrationNumber: 'AL-12345'
+    },
+    token
+  );
+
+  assert.equal(updated.status, 200);
+  assert.equal(updated.json.ok, true);
+  assert.equal(updated.json.data.name, 'Alojamento Teste Atualizado');
+  assert.equal(updated.json.data.city, 'Porto');
+});
+
+test('DELETE /api/accommodations/:id blocks when active reservations exist', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Ativa',
+      checkIn: '2026-09-10',
+      checkOut: '2026-09-12'
+    },
+    token
+  );
+
+  const response = await request(server, 'DELETE', '/api/accommodations/acc_test_1', null, token);
+  assert.equal(response.status, 409);
+  assert.equal(response.json.ok, false);
+});
+
+test('DELETE /api/accommodations/:id force removes accommodation and reservations', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Forcada',
+      checkIn: '2026-10-10',
+      checkOut: '2026-10-12'
+    },
+    token
+  );
+
+  const removed = await request(server, 'DELETE', '/api/accommodations/acc_test_1?force=true', null, token);
+  const reservations = await request(server, 'GET', '/api/reservations', null, token);
+
+  assert.equal(removed.status, 200);
+  assert.equal(removed.json.ok, true);
+  assert.equal(reservations.json.data.length, 0);
 });
 
 test('POST /api/reservations creates valid reservation', async () => {

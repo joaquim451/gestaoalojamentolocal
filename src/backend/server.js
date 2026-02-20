@@ -9,6 +9,8 @@ const port = Number(process.env.PORT || 3000);
 const RESERVATION_STATUSES = new Set(['confirmed', 'cancelled', 'checked_in', 'checked_out']);
 const USER_ROLES = new Set(['admin', 'manager']);
 const AUTH_PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH || 10);
+const AUTH_LOGIN_MAX_ATTEMPTS = Number(process.env.AUTH_LOGIN_MAX_ATTEMPTS || 5);
+const AUTH_LOGIN_LOCK_MINUTES = Number(process.env.AUTH_LOGIN_LOCK_MINUTES || 15);
 
 app.use(express.json());
 app.use(morgan('dev'));
@@ -60,9 +62,20 @@ function serializeUser(user) {
     name: user.name,
     email: user.email,
     role: user.role,
+    failedLoginAttempts: Number(user.failedLoginAttempts || 0),
+    lockUntil: user.lockUntil || null,
+    lastFailedLoginAt: user.lastFailedLoginAt || null,
+    lastLoginAt: user.lastLoginAt || null,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt
   };
+}
+
+function isUserLocked(user) {
+  if (!user || !user.lockUntil) {
+    return false;
+  }
+  return new Date(user.lockUntil) > new Date();
 }
 
 function ensureBootstrapAdmin(db) {
@@ -78,6 +91,10 @@ function ensureBootstrapAdmin(db) {
     email: (process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL || 'admin@gestaoalojamentolocal.local').toLowerCase(),
     role: 'admin',
     passwordHash: hashPassword(process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD || 'change-me-now'),
+    failedLoginAttempts: 0,
+    lockUntil: null,
+    lastFailedLoginAt: null,
+    lastLoginAt: null,
     createdAt: now,
     updatedAt: now
   };
@@ -136,16 +153,47 @@ app.post('/api/auth/login', (req, res) => {
   const bootstrapUser = ensureBootstrapAdmin(db);
   const user = db.users.find((item) => item.email === normalizedEmail);
 
+  if (user && isUserLocked(user)) {
+    appendAuditLog(db, {
+      action: 'auth.login.blocked',
+      actor: { userId: user.id, email: user.email, role: user.role },
+      target: { type: 'user', id: user.id },
+      metadata: { reason: 'account_locked', lockUntil: user.lockUntil }
+    });
+    writeDb(db);
+    return res.status(423).json({ ok: false, error: 'Conta temporariamente bloqueada por tentativas falhadas.' });
+  }
+
   if (!user || !verifyPassword(password, user.passwordHash)) {
+    if (user) {
+      user.failedLoginAttempts = Number(user.failedLoginAttempts || 0) + 1;
+      user.lastFailedLoginAt = new Date().toISOString();
+      if (user.failedLoginAttempts >= AUTH_LOGIN_MAX_ATTEMPTS) {
+        const lockUntil = new Date(Date.now() + AUTH_LOGIN_LOCK_MINUTES * 60 * 1000).toISOString();
+        user.lockUntil = lockUntil;
+      }
+      user.updatedAt = new Date().toISOString();
+    }
+
     appendAuditLog(db, {
       action: 'auth.login.failed',
       actor: { userId: user ? user.id : null, email: normalizedEmail, role: user ? user.role : null },
       target: null,
-      metadata: { reason: 'invalid_credentials' }
+      metadata: {
+        reason: 'invalid_credentials',
+        failedLoginAttempts: user ? user.failedLoginAttempts : null,
+        lockUntil: user ? user.lockUntil : null
+      }
     });
     writeDb(db);
     return res.status(401).json({ ok: false, error: 'Credenciais invalidas.' });
   }
+
+  user.failedLoginAttempts = 0;
+  user.lockUntil = null;
+  user.lastFailedLoginAt = null;
+  user.lastLoginAt = new Date().toISOString();
+  user.updatedAt = new Date().toISOString();
 
   const token = createToken({ sub: user.id, email: user.email, role: user.role });
   appendAuditLog(db, {
@@ -253,6 +301,10 @@ app.post('/api/users', requireRole('admin'), (req, res) => {
     email: normalizedEmail,
     role: nextRole,
     passwordHash: hashPassword(password),
+    failedLoginAttempts: 0,
+    lockUntil: null,
+    lastFailedLoginAt: null,
+    lastLoginAt: null,
     createdAt: now,
     updatedAt: now
   };
@@ -329,6 +381,12 @@ app.post('/api/accommodations', (req, res) => {
   };
 
   db.accommodations.push(accommodation);
+  appendAuditLog(db, {
+    action: 'accommodations.create',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'accommodation', id: accommodation.id },
+    metadata: { name: accommodation.name, city: accommodation.city, municipality: accommodation.municipality }
+  });
   writeDb(db);
   return res.status(201).json({ ok: true, data: accommodation });
 });
@@ -341,6 +399,94 @@ app.get('/api/accommodations/:id', (req, res) => {
     return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
   }
   return res.json({ ok: true, data: accommodation });
+});
+
+app.put('/api/accommodations/:id', (req, res) => {
+  const { name, city, municipality, localRegistrationNumber } = req.body || {};
+  const db = readDb();
+  normalizeDomainCollections(db);
+
+  const index = db.accommodations.findIndex((item) => item.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
+  }
+
+  if (name !== undefined && !String(name).trim()) {
+    return res.status(400).json({ ok: false, error: 'name nao pode ser vazio.' });
+  }
+
+  const current = db.accommodations[index];
+  const updated = {
+    ...current,
+    name: name !== undefined ? String(name).trim() : current.name,
+    city: city !== undefined ? city : current.city,
+    municipality: municipality !== undefined ? municipality : current.municipality,
+    localRegistrationNumber:
+      localRegistrationNumber !== undefined ? localRegistrationNumber : current.localRegistrationNumber,
+    updatedAt: new Date().toISOString()
+  };
+
+  db.accommodations[index] = updated;
+  appendAuditLog(db, {
+    action: 'accommodations.update',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'accommodation', id: updated.id },
+    metadata: {
+      name: updated.name,
+      city: updated.city,
+      municipality: updated.municipality,
+      localRegistrationNumber: updated.localRegistrationNumber
+    }
+  });
+  writeDb(db);
+
+  return res.json({ ok: true, data: updated });
+});
+
+app.delete('/api/accommodations/:id', (req, res) => {
+  const force = String(req.query.force || 'false') === 'true';
+  const db = readDb();
+  normalizeDomainCollections(db);
+
+  const index = db.accommodations.findIndex((item) => item.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
+  }
+
+  const hasBlockingReservation = db.reservations.some((item) => {
+    return item.accommodationId === req.params.id && item.status !== 'cancelled';
+  });
+
+  if (hasBlockingReservation && !force) {
+    return res.status(409).json({
+      ok: false,
+      error: 'Existem reservas ativas para este alojamento. Use force=true para remover mesmo assim.'
+    });
+  }
+
+  const [removedAccommodation] = db.accommodations.splice(index, 1);
+  let removedReservations = 0;
+  if (force) {
+    const before = db.reservations.length;
+    db.reservations = db.reservations.filter((item) => item.accommodationId !== req.params.id);
+    removedReservations = before - db.reservations.length;
+  }
+
+  appendAuditLog(db, {
+    action: 'accommodations.delete',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'accommodation', id: removedAccommodation.id },
+    metadata: { force, removedReservations }
+  });
+  writeDb(db);
+
+  return res.json({
+    ok: true,
+    data: removedAccommodation,
+    message: force
+      ? `Alojamento removido com sucesso. Reservas removidas: ${removedReservations}.`
+      : 'Alojamento removido com sucesso.'
+  });
 });
 
 app.get('/api/reservations', (req, res) => {
