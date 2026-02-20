@@ -10,7 +10,7 @@ function getDbPath() {
 function ensureDb() {
   const dbPath = getDbPath();
   if (!fs.existsSync(dbPath)) {
-    const initial = { accommodations: [], reservations: [] };
+    const initial = { users: [], accommodations: [], reservations: [] };
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     fs.writeFileSync(dbPath, JSON.stringify(initial, null, 2), 'utf8');
   }

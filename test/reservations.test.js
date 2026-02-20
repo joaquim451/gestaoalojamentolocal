@@ -8,11 +8,16 @@ const TEMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'gal-tests-'));
 const DB_PATH = path.join(TEMP_DIR, 'db.json');
 
 process.env.DB_PATH = DB_PATH;
+process.env.AUTH_JWT_SECRET = 'test-secret';
+process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL = 'admin@test.local';
+process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD = 'test-password-123';
+process.env.AUTH_BOOTSTRAP_ADMIN_NAME = 'Test Admin';
 
 const { app } = require('../src/backend/server');
 
 function resetDb() {
   const initial = {
+    users: [],
     accommodations: [
       {
         id: 'acc_test_1',
@@ -42,11 +47,16 @@ function resetDb() {
   fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2), 'utf8');
 }
 
-async function request(server, method, route, body) {
+async function request(server, method, route, body, token) {
   const address = server.address();
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
   const response = await fetch(`http://127.0.0.1:${address.port}${route}`, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: body ? JSON.stringify(body) : undefined
   });
 
@@ -54,6 +64,17 @@ async function request(server, method, route, body) {
     status: response.status,
     json: await response.json()
   };
+}
+
+async function loginAsAdmin(server) {
+  const response = await request(server, 'POST', '/api/auth/login', {
+    email: process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    password: process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.json.ok, true);
+  return response.json.token;
 }
 
 let server;
@@ -67,13 +88,85 @@ test.afterEach(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-test('POST /api/reservations creates valid reservation', async () => {
-  const response = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Maria Silva',
-    checkIn: '2026-03-10',
-    checkOut: '2026-03-12'
+test('GET /api/reservations requires authentication', async () => {
+  const response = await request(server, 'GET', '/api/reservations');
+  assert.equal(response.status, 401);
+  assert.equal(response.json.ok, false);
+});
+
+test('POST /api/auth/login returns token and user', async () => {
+  const response = await request(server, 'POST', '/api/auth/login', {
+    email: process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    password: process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
   });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.json.ok, true);
+  assert.equal(typeof response.json.token, 'string');
+  assert.equal(response.json.user.email, process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL);
+});
+
+test('POST /api/auth/change-password updates credentials', async () => {
+  const token = await loginAsAdmin(server);
+
+  const changed = await request(
+    server,
+    'POST',
+    '/api/auth/change-password',
+    {
+      currentPassword: process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD,
+      newPassword: 'new-test-password-456'
+    },
+    token
+  );
+
+  const oldLogin = await request(server, 'POST', '/api/auth/login', {
+    email: process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    password: process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
+  });
+
+  const newLogin = await request(server, 'POST', '/api/auth/login', {
+    email: process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL,
+    password: 'new-test-password-456'
+  });
+
+  assert.equal(changed.status, 200);
+  assert.equal(changed.json.ok, true);
+  assert.equal(oldLogin.status, 401);
+  assert.equal(newLogin.status, 200);
+});
+
+test('POST /api/auth/change-password rejects wrong current password', async () => {
+  const token = await loginAsAdmin(server);
+  const changed = await request(
+    server,
+    'POST',
+    '/api/auth/change-password',
+    {
+      currentPassword: 'wrong-password',
+      newPassword: 'new-test-password-456'
+    },
+    token
+  );
+
+  assert.equal(changed.status, 401);
+  assert.equal(changed.json.ok, false);
+});
+
+test('POST /api/reservations creates valid reservation', async () => {
+  const token = await loginAsAdmin(server);
+  const response = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Maria Silva',
+      checkIn: '2026-03-10',
+      checkOut: '2026-03-12'
+    },
+    token
+  );
 
   assert.equal(response.status, 201);
   assert.equal(response.json.ok, true);
@@ -81,19 +174,32 @@ test('POST /api/reservations creates valid reservation', async () => {
 });
 
 test('POST /api/reservations blocks overlapping dates', async () => {
-  const first = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Cliente 1',
-    checkIn: '2026-03-10',
-    checkOut: '2026-03-12'
-  });
+  const token = await loginAsAdmin(server);
+  const first = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Cliente 1',
+      checkIn: '2026-03-10',
+      checkOut: '2026-03-12'
+    },
+    token
+  );
 
-  const second = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Cliente 2',
-    checkIn: '2026-03-11',
-    checkOut: '2026-03-13'
-  });
+  const second = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Cliente 2',
+      checkIn: '2026-03-11',
+      checkOut: '2026-03-13'
+    },
+    token
+  );
 
   assert.equal(first.status, 201);
   assert.equal(second.status, 409);
@@ -101,18 +207,31 @@ test('POST /api/reservations blocks overlapping dates', async () => {
 });
 
 test('PUT /api/reservations/:id updates reservation without conflict', async () => {
-  const created = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Cliente Inicial',
-    checkIn: '2026-03-10',
-    checkOut: '2026-03-12'
-  });
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Cliente Inicial',
+      checkIn: '2026-03-10',
+      checkOut: '2026-03-12'
+    },
+    token
+  );
 
-  const updated = await request(server, 'PUT', `/api/reservations/${created.json.data.id}`, {
-    guestName: 'Cliente Atualizado',
-    checkIn: '2026-03-12',
-    checkOut: '2026-03-14'
-  });
+  const updated = await request(
+    server,
+    'PUT',
+    `/api/reservations/${created.json.data.id}`,
+    {
+      guestName: 'Cliente Atualizado',
+      checkIn: '2026-03-12',
+      checkOut: '2026-03-14'
+    },
+    token
+  );
 
   assert.equal(updated.status, 200);
   assert.equal(updated.json.data.guestName, 'Cliente Atualizado');
@@ -120,15 +239,22 @@ test('PUT /api/reservations/:id updates reservation without conflict', async () 
 });
 
 test('DELETE /api/reservations/:id removes reservation', async () => {
-  const created = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Cliente Delete',
-    checkIn: '2026-03-10',
-    checkOut: '2026-03-12'
-  });
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Cliente Delete',
+      checkIn: '2026-03-10',
+      checkOut: '2026-03-12'
+    },
+    token
+  );
 
-  const deleted = await request(server, 'DELETE', `/api/reservations/${created.json.data.id}`);
-  const fetched = await request(server, 'GET', `/api/reservations/${created.json.data.id}`);
+  const deleted = await request(server, 'DELETE', `/api/reservations/${created.json.data.id}`, null, token);
+  const fetched = await request(server, 'GET', `/api/reservations/${created.json.data.id}`, null, token);
 
   assert.equal(deleted.status, 200);
   assert.equal(deleted.json.ok, true);
@@ -136,30 +262,51 @@ test('DELETE /api/reservations/:id removes reservation', async () => {
 });
 
 test('GET /api/reservations filters by status and date range', async () => {
-  await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Filtro 1',
-    checkIn: '2026-04-01',
-    checkOut: '2026-04-03',
-    status: 'confirmed'
-  });
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Filtro 1',
+      checkIn: '2026-04-01',
+      checkOut: '2026-04-03',
+      status: 'confirmed'
+    },
+    token
+  );
 
-  const created2 = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Filtro 2',
-    checkIn: '2026-04-10',
-    checkOut: '2026-04-12',
-    status: 'confirmed'
-  });
+  const created2 = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Filtro 2',
+      checkIn: '2026-04-10',
+      checkOut: '2026-04-12',
+      status: 'confirmed'
+    },
+    token
+  );
 
-  await request(server, 'PATCH', `/api/reservations/${created2.json.data.id}/status`, {
-    status: 'cancelled'
-  });
+  await request(
+    server,
+    'PATCH',
+    `/api/reservations/${created2.json.data.id}/status`,
+    {
+      status: 'cancelled'
+    },
+    token
+  );
 
   const filtered = await request(
     server,
     'GET',
-    '/api/reservations?status=cancelled&dateFrom=2026-04-01&dateTo=2026-04-30'
+    '/api/reservations?status=cancelled&dateFrom=2026-04-01&dateTo=2026-04-30',
+    null,
+    token
   );
 
   assert.equal(filtered.status, 200);
@@ -168,46 +315,80 @@ test('GET /api/reservations filters by status and date range', async () => {
 });
 
 test('PATCH /api/reservations/:id/status updates state', async () => {
-  const created = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Patch Status',
-    checkIn: '2026-05-10',
-    checkOut: '2026-05-12'
-  });
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Patch Status',
+      checkIn: '2026-05-10',
+      checkOut: '2026-05-12'
+    },
+    token
+  );
 
-  const patched = await request(server, 'PATCH', `/api/reservations/${created.json.data.id}/status`, {
-    status: 'checked_in'
-  });
+  const patched = await request(
+    server,
+    'PATCH',
+    `/api/reservations/${created.json.data.id}/status`,
+    {
+      status: 'checked_in'
+    },
+    token
+  );
 
   assert.equal(patched.status, 200);
   assert.equal(patched.json.data.status, 'checked_in');
 });
 
 test('GET /api/calendar returns active reservations in range', async () => {
-  await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Calendar 1',
-    checkIn: '2026-06-10',
-    checkOut: '2026-06-12',
-    status: 'confirmed'
-  });
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Calendar 1',
+      checkIn: '2026-06-10',
+      checkOut: '2026-06-12',
+      status: 'confirmed'
+    },
+    token
+  );
 
-  const cancelled = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Calendar Cancelled',
-    checkIn: '2026-06-14',
-    checkOut: '2026-06-16',
-    status: 'confirmed'
-  });
+  const cancelled = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Calendar Cancelled',
+      checkIn: '2026-06-14',
+      checkOut: '2026-06-16',
+      status: 'confirmed'
+    },
+    token
+  );
 
-  await request(server, 'PATCH', `/api/reservations/${cancelled.json.data.id}/status`, {
-    status: 'cancelled'
-  });
+  await request(
+    server,
+    'PATCH',
+    `/api/reservations/${cancelled.json.data.id}/status`,
+    {
+      status: 'cancelled'
+    },
+    token
+  );
 
   const calendar = await request(
     server,
     'GET',
-    '/api/calendar?accommodationId=acc_test_1&dateFrom=2026-06-01&dateTo=2026-06-30'
+    '/api/calendar?accommodationId=acc_test_1&dateFrom=2026-06-01&dateTo=2026-06-30',
+    null,
+    token
   );
 
   assert.equal(calendar.status, 200);
@@ -216,12 +397,19 @@ test('GET /api/calendar returns active reservations in range', async () => {
 });
 
 test('POST /api/reservations rejects invalid date order', async () => {
-  const response = await request(server, 'POST', '/api/reservations', {
-    accommodationId: 'acc_test_1',
-    guestName: 'Data Invalida',
-    checkIn: '2026-07-15',
-    checkOut: '2026-07-10'
-  });
+  const token = await loginAsAdmin(server);
+  const response = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Data Invalida',
+      checkIn: '2026-07-15',
+      checkOut: '2026-07-10'
+    },
+    token
+  );
 
   assert.equal(response.status, 400);
   assert.equal(response.json.ok, false);

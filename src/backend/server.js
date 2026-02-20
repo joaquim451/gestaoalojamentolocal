@@ -1,11 +1,13 @@
-﻿const express = require('express');
+const express = require('express');
 const morgan = require('morgan');
 const { readDb, writeDb, nextId } = require('./store');
 const { getBookingConfig, pingBookingConnection, syncAccommodation } = require('./bookingClient');
+const { hashPassword, verifyPassword, createToken, verifyToken } = require('./auth');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const RESERVATION_STATUSES = new Set(['confirmed', 'cancelled', 'checked_in', 'checked_out']);
+const AUTH_PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH || 10);
 
 app.use(express.json());
 app.use(morgan('dev'));
@@ -23,8 +25,148 @@ function hasDateRangeOverlap(aStart, aEnd, bStart, bEnd) {
   return new Date(aStart) < new Date(bEnd) && new Date(aEnd) > new Date(bStart);
 }
 
+function normalizeUsersCollection(db) {
+  if (!Array.isArray(db.users)) {
+    db.users = [];
+  }
+}
+
+function serializeUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt
+  };
+}
+
+function ensureBootstrapAdmin(db) {
+  normalizeUsersCollection(db);
+
+  if (db.users.length > 0) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const bootstrapUser = {
+    id: nextId('usr'),
+    name: process.env.AUTH_BOOTSTRAP_ADMIN_NAME || 'Admin',
+    email: (process.env.AUTH_BOOTSTRAP_ADMIN_EMAIL || 'admin@gestaoalojamentolocal.local').toLowerCase(),
+    role: 'admin',
+    passwordHash: hashPassword(process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD || 'change-me-now'),
+    createdAt: now,
+    updatedAt: now
+  };
+
+  db.users.push(bootstrapUser);
+  return bootstrapUser;
+}
+
+function authRequired(req, res, next) {
+  const rawHeader = req.headers.authorization || '';
+  const [scheme, token] = String(rawHeader).split(' ');
+
+  if (scheme !== 'Bearer' || !token) {
+    return res.status(401).json({ ok: false, error: 'Autenticação obrigatória. Use Bearer token.' });
+  }
+
+  const result = verifyToken(token);
+  if (!result.ok) {
+    return res.status(401).json({ ok: false, error: result.error });
+  }
+
+  const db = readDb();
+  normalizeUsersCollection(db);
+  const user = db.users.find((item) => item.id === result.payload.sub);
+  if (!user) {
+    return res.status(401).json({ ok: false, error: 'Utilizador do token já não existe.' });
+  }
+
+  req.auth = { userId: user.id, role: user.role, email: user.email };
+  req.authUser = user;
+  return next();
+}
+
 app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'gestaoalojamentolocal-api', now: new Date().toISOString() });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body || {};
+
+  if (!email || !password) {
+    return res.status(400).json({ ok: false, error: 'Campos obrigatórios: email, password' });
+  }
+
+  const db = readDb();
+  const bootstrapUser = ensureBootstrapAdmin(db);
+  if (bootstrapUser) {
+    writeDb(db);
+  }
+
+  const user = db.users.find((item) => item.email === String(email).toLowerCase());
+  if (!user || !verifyPassword(password, user.passwordHash)) {
+    return res.status(401).json({ ok: false, error: 'Credenciais inválidas.' });
+  }
+
+  const token = createToken({ sub: user.id, email: user.email, role: user.role });
+  return res.json({
+    ok: true,
+    token,
+    user: serializeUser(user)
+  });
+});
+
+app.use('/api', (req, res, next) => {
+  if (req.path === '/auth/login') {
+    return next();
+  }
+  return authRequired(req, res, next);
+});
+
+app.get('/api/auth/me', (req, res) => {
+  return res.json({ ok: true, user: serializeUser(req.authUser) });
+});
+
+app.post('/api/auth/change-password', (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ ok: false, error: 'Campos obrigatórios: currentPassword, newPassword' });
+  }
+
+  if (String(newPassword).length < AUTH_PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({
+      ok: false,
+      error: `newPassword deve ter pelo menos ${AUTH_PASSWORD_MIN_LENGTH} caracteres.`
+    });
+  }
+
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ ok: false, error: 'newPassword deve ser diferente da password atual.' });
+  }
+
+  const db = readDb();
+  normalizeUsersCollection(db);
+  const index = db.users.findIndex((item) => item.id === req.auth.userId);
+
+  if (index === -1) {
+    return res.status(404).json({ ok: false, error: 'Utilizador não encontrado.' });
+  }
+
+  const user = db.users[index];
+  if (!verifyPassword(currentPassword, user.passwordHash)) {
+    return res.status(401).json({ ok: false, error: 'Password atual inválida.' });
+  }
+
+  user.passwordHash = hashPassword(newPassword);
+  user.updatedAt = new Date().toISOString();
+  db.users[index] = user;
+  writeDb(db);
+
+  return res.json({ ok: true, message: 'Password atualizada com sucesso.' });
 });
 
 app.get('/api/config/booking', (req, res) => {

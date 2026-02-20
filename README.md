@@ -25,6 +25,7 @@ Construir uma plataforma para proprietários e gestores de Alojamento Local em P
 ## MVP Técnico Atual
 - Backend Node.js/Express inicial em `src/backend`.
 - Persistência local em `data/db.json`.
+- Autenticação JWT simples com utilizador admin bootstrap via variáveis `AUTH_BOOTSTRAP_*`.
 - Endpoints de alojamentos e controle de ligação Booking por alojamento.
 - Endpoint de link para Livro de Reclamações.
 

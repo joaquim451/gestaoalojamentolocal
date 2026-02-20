@@ -5,6 +5,25 @@ Base URL local: `http://localhost:3000`
 ## Health
 - `GET /health`
 
+## Autenticação
+- `POST /api/auth/login`
+```json
+{
+  "email": "admin@gestaoalojamentolocal.local",
+  "password": "change-me-now"
+}
+```
+- `GET /api/auth/me` (requer Bearer token)
+- `POST /api/auth/change-password` (requer Bearer token)
+```json
+{
+  "currentPassword": "change-me-now",
+  "newPassword": "new-strong-password-123"
+}
+```
+- Todos os endpoints `/api/*` exceto `/api/auth/login` requerem header:
+  - `Authorization: Bearer <token>`
+
 ## Configuração Booking
 - `GET /api/config/booking`
 - Retorna apenas metadados (sem password), incluindo `hasCredentials`.
@@ -93,6 +112,12 @@ Regras:
 - `GET /api/legal/complaints-book-link`
 
 ## Variáveis de ambiente (Booking)
+- `AUTH_JWT_SECRET`
+- `AUTH_TOKEN_TTL_SECONDS`
+- `AUTH_PASSWORD_MIN_LENGTH`
+- `AUTH_BOOTSTRAP_ADMIN_NAME`
+- `AUTH_BOOTSTRAP_ADMIN_EMAIL`
+- `AUTH_BOOTSTRAP_ADMIN_PASSWORD`
 - `BOOKING_USERNAME`
 - `BOOKING_PASSWORD`
 - `BOOKING_API_BASE_URL`
