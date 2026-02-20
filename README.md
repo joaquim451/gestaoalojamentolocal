@@ -26,6 +26,8 @@ Construir uma plataforma para proprietários e gestores de Alojamento Local em P
 - Backend Node.js/Express inicial em `src/backend`.
 - Persistência local em `data/db.json`.
 - Autenticação JWT simples com utilizador admin bootstrap via variáveis `AUTH_BOOTSTRAP_*`.
+- Gestão de utilizadores com perfis `admin` e `manager` (endpoints admin-only para criar/listar).
+- Auditoria persistente de ações críticas (login, gestão de utilizadores, operações de reservas).
 - Endpoints de alojamentos e controle de ligação Booking por alojamento.
 - Endpoint de link para Livro de Reclamações.
 

@@ -7,6 +7,7 @@ const { hashPassword, verifyPassword, createToken, verifyToken } = require('./au
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const RESERVATION_STATUSES = new Set(['confirmed', 'cancelled', 'checked_in', 'checked_out']);
+const USER_ROLES = new Set(['admin', 'manager']);
 const AUTH_PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH || 10);
 
 app.use(express.json());
@@ -16,9 +17,7 @@ function isValidIsoDate(value) {
   if (!value || typeof value !== 'string') {
     return false;
   }
-
-  const time = Date.parse(value);
-  return !Number.isNaN(time);
+  return !Number.isNaN(Date.parse(value));
 }
 
 function hasDateRangeOverlap(aStart, aEnd, bStart, bEnd) {
@@ -29,6 +28,30 @@ function normalizeUsersCollection(db) {
   if (!Array.isArray(db.users)) {
     db.users = [];
   }
+}
+
+function normalizeAuditLogsCollection(db) {
+  if (!Array.isArray(db.auditLogs)) {
+    db.auditLogs = [];
+  }
+}
+
+function normalizeDomainCollections(db) {
+  if (!Array.isArray(db.accommodations)) {
+    db.accommodations = [];
+  }
+  if (!Array.isArray(db.reservations)) {
+    db.reservations = [];
+  }
+}
+
+function appendAuditLog(db, event) {
+  normalizeAuditLogsCollection(db);
+  db.auditLogs.push({
+    id: nextId('audit'),
+    at: new Date().toISOString(),
+    ...event
+  });
 }
 
 function serializeUser(user) {
@@ -44,7 +67,6 @@ function serializeUser(user) {
 
 function ensureBootstrapAdmin(db) {
   normalizeUsersCollection(db);
-
   if (db.users.length > 0) {
     return null;
   }
@@ -67,9 +89,8 @@ function ensureBootstrapAdmin(db) {
 function authRequired(req, res, next) {
   const rawHeader = req.headers.authorization || '';
   const [scheme, token] = String(rawHeader).split(' ');
-
   if (scheme !== 'Bearer' || !token) {
-    return res.status(401).json({ ok: false, error: 'Autenticação obrigatória. Use Bearer token.' });
+    return res.status(401).json({ ok: false, error: 'Autenticacao obrigatoria. Use Bearer token.' });
   }
 
   const result = verifyToken(token);
@@ -81,12 +102,21 @@ function authRequired(req, res, next) {
   normalizeUsersCollection(db);
   const user = db.users.find((item) => item.id === result.payload.sub);
   if (!user) {
-    return res.status(401).json({ ok: false, error: 'Utilizador do token já não existe.' });
+    return res.status(401).json({ ok: false, error: 'Utilizador do token ja nao existe.' });
   }
 
   req.auth = { userId: user.id, role: user.role, email: user.email };
   req.authUser = user;
   return next();
+}
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.auth.role)) {
+      return res.status(403).json({ ok: false, error: 'Sem permissao para esta acao.' });
+    }
+    return next();
+  };
 }
 
 app.get('/health', (req, res) => {
@@ -95,28 +125,38 @@ app.get('/health', (req, res) => {
 
 app.post('/api/auth/login', (req, res) => {
   const { email, password } = req.body || {};
+  const normalizedEmail = String(email || '').toLowerCase().trim();
 
   if (!email || !password) {
-    return res.status(400).json({ ok: false, error: 'Campos obrigatórios: email, password' });
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: email, password' });
   }
 
   const db = readDb();
+  normalizeUsersCollection(db);
   const bootstrapUser = ensureBootstrapAdmin(db);
-  if (bootstrapUser) {
-    writeDb(db);
-  }
+  const user = db.users.find((item) => item.email === normalizedEmail);
 
-  const user = db.users.find((item) => item.email === String(email).toLowerCase());
   if (!user || !verifyPassword(password, user.passwordHash)) {
-    return res.status(401).json({ ok: false, error: 'Credenciais inválidas.' });
+    appendAuditLog(db, {
+      action: 'auth.login.failed',
+      actor: { userId: user ? user.id : null, email: normalizedEmail, role: user ? user.role : null },
+      target: null,
+      metadata: { reason: 'invalid_credentials' }
+    });
+    writeDb(db);
+    return res.status(401).json({ ok: false, error: 'Credenciais invalidas.' });
   }
 
   const token = createToken({ sub: user.id, email: user.email, role: user.role });
-  return res.json({
-    ok: true,
-    token,
-    user: serializeUser(user)
+  appendAuditLog(db, {
+    action: 'auth.login.success',
+    actor: { userId: user.id, email: user.email, role: user.role },
+    target: { type: 'user', id: user.id },
+    metadata: { bootstrapAdminCreated: Boolean(bootstrapUser) }
   });
+  writeDb(db);
+
+  return res.json({ ok: true, token, user: serializeUser(user) });
 });
 
 app.use('/api', (req, res, next) => {
@@ -132,18 +172,15 @@ app.get('/api/auth/me', (req, res) => {
 
 app.post('/api/auth/change-password', (req, res) => {
   const { currentPassword, newPassword } = req.body || {};
-
   if (!currentPassword || !newPassword) {
-    return res.status(400).json({ ok: false, error: 'Campos obrigatórios: currentPassword, newPassword' });
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: currentPassword, newPassword' });
   }
-
   if (String(newPassword).length < AUTH_PASSWORD_MIN_LENGTH) {
     return res.status(400).json({
       ok: false,
       error: `newPassword deve ter pelo menos ${AUTH_PASSWORD_MIN_LENGTH} caracteres.`
     });
   }
-
   if (currentPassword === newPassword) {
     return res.status(400).json({ ok: false, error: 'newPassword deve ser diferente da password atual.' });
   }
@@ -151,22 +188,103 @@ app.post('/api/auth/change-password', (req, res) => {
   const db = readDb();
   normalizeUsersCollection(db);
   const index = db.users.findIndex((item) => item.id === req.auth.userId);
-
   if (index === -1) {
-    return res.status(404).json({ ok: false, error: 'Utilizador não encontrado.' });
+    return res.status(404).json({ ok: false, error: 'Utilizador nao encontrado.' });
   }
 
   const user = db.users[index];
   if (!verifyPassword(currentPassword, user.passwordHash)) {
-    return res.status(401).json({ ok: false, error: 'Password atual inválida.' });
+    return res.status(401).json({ ok: false, error: 'Password atual invalida.' });
   }
 
   user.passwordHash = hashPassword(newPassword);
   user.updatedAt = new Date().toISOString();
   db.users[index] = user;
+  appendAuditLog(db, {
+    action: 'auth.change_password',
+    actor: { userId: user.id, email: user.email, role: user.role },
+    target: { type: 'user', id: user.id },
+    metadata: null
+  });
   writeDb(db);
 
   return res.json({ ok: true, message: 'Password atualizada com sucesso.' });
+});
+
+app.get('/api/users', requireRole('admin'), (req, res) => {
+  const db = readDb();
+  normalizeUsersCollection(db);
+  return res.json({ ok: true, data: db.users.map(serializeUser) });
+});
+
+app.post('/api/users', requireRole('admin'), (req, res) => {
+  const { name, email, password, role } = req.body || {};
+  if (!name || !email || !password) {
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: name, email, password' });
+  }
+  if (String(password).length < AUTH_PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({
+      ok: false,
+      error: `password deve ter pelo menos ${AUTH_PASSWORD_MIN_LENGTH} caracteres.`
+    });
+  }
+
+  const normalizedEmail = String(email).toLowerCase().trim();
+  if (!normalizedEmail.includes('@')) {
+    return res.status(400).json({ ok: false, error: 'email invalido.' });
+  }
+
+  const nextRole = role || 'manager';
+  if (!USER_ROLES.has(nextRole)) {
+    return res.status(400).json({ ok: false, error: 'role invalido. Valores permitidos: admin, manager' });
+  }
+
+  const db = readDb();
+  normalizeUsersCollection(db);
+  const exists = db.users.some((item) => item.email === normalizedEmail);
+  if (exists) {
+    return res.status(409).json({ ok: false, error: 'Ja existe utilizador com este email.' });
+  }
+
+  const now = new Date().toISOString();
+  const user = {
+    id: nextId('usr'),
+    name: String(name).trim(),
+    email: normalizedEmail,
+    role: nextRole,
+    passwordHash: hashPassword(password),
+    createdAt: now,
+    updatedAt: now
+  };
+
+  db.users.push(user);
+  appendAuditLog(db, {
+    action: 'users.create',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'user', id: user.id },
+    metadata: { role: user.role, email: user.email }
+  });
+  writeDb(db);
+
+  return res.status(201).json({ ok: true, data: serializeUser(user) });
+});
+
+app.get('/api/audit-logs', requireRole('admin'), (req, res) => {
+  const { action, userId, limit } = req.query || {};
+  const db = readDb();
+  normalizeAuditLogsCollection(db);
+
+  let logs = db.auditLogs;
+  if (action) {
+    logs = logs.filter((item) => item.action === action);
+  }
+  if (userId) {
+    logs = logs.filter((item) => item.actor && item.actor.userId === userId);
+  }
+
+  const max = Math.min(Number(limit) || 100, 500);
+  const data = [...logs].reverse().slice(0, max);
+  return res.json({ ok: true, data });
 });
 
 app.get('/api/config/booking', (req, res) => {
@@ -175,17 +293,18 @@ app.get('/api/config/booking', (req, res) => {
 
 app.get('/api/accommodations', (req, res) => {
   const db = readDb();
+  normalizeDomainCollections(db);
   res.json({ ok: true, data: db.accommodations });
 });
 
 app.post('/api/accommodations', (req, res) => {
   const { name, city, municipality, localRegistrationNumber } = req.body || {};
-
   if (!name) {
-    return res.status(400).json({ ok: false, error: 'Campo obrigatório: name' });
+    return res.status(400).json({ ok: false, error: 'Campo obrigatorio: name' });
   }
 
   const db = readDb();
+  normalizeDomainCollections(db);
 
   const accommodation = {
     id: nextId('acc'),
@@ -211,42 +330,37 @@ app.post('/api/accommodations', (req, res) => {
 
   db.accommodations.push(accommodation);
   writeDb(db);
-
   return res.status(201).json({ ok: true, data: accommodation });
 });
 
 app.get('/api/accommodations/:id', (req, res) => {
   const db = readDb();
+  normalizeDomainCollections(db);
   const accommodation = db.accommodations.find((item) => item.id === req.params.id);
   if (!accommodation) {
-    return res.status(404).json({ ok: false, error: 'Alojamento não encontrado' });
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
   }
-
   return res.json({ ok: true, data: accommodation });
 });
 
 app.get('/api/reservations', (req, res) => {
   const { accommodationId, dateFrom, dateTo, status } = req.query || {};
   const db = readDb();
+  normalizeDomainCollections(db);
 
   let data = db.reservations;
-
   if (accommodationId) {
     data = data.filter((item) => item.accommodationId === accommodationId);
   }
-
   if (status) {
     data = data.filter((item) => item.status === status);
   }
-
   if (dateFrom || dateTo) {
     if ((dateFrom && !isValidIsoDate(dateFrom)) || (dateTo && !isValidIsoDate(dateTo))) {
-      return res.status(400).json({ ok: false, error: 'dateFrom/dateTo inválidos. Use formato ISO (YYYY-MM-DD).' });
+      return res.status(400).json({ ok: false, error: 'dateFrom/dateTo invalidos. Use formato ISO (YYYY-MM-DD).' });
     }
-
     const fromDate = dateFrom || '1970-01-01';
     const toDate = dateTo || '9999-12-31';
-
     data = data.filter((item) => hasDateRangeOverlap(item.checkIn, item.checkOut, fromDate, toDate));
   }
 
@@ -254,28 +368,16 @@ app.get('/api/reservations', (req, res) => {
 });
 
 app.post('/api/reservations', (req, res) => {
-  const {
-    accommodationId,
-    guestName,
-    checkIn,
-    checkOut,
-    adults,
-    children,
-    source,
-    status
-  } = req.body || {};
-
+  const { accommodationId, guestName, checkIn, checkOut, adults, children, source, status } = req.body || {};
   if (!accommodationId || !guestName || !checkIn || !checkOut) {
     return res.status(400).json({
       ok: false,
-      error: 'Campos obrigatórios: accommodationId, guestName, checkIn, checkOut'
+      error: 'Campos obrigatorios: accommodationId, guestName, checkIn, checkOut'
     });
   }
-
   if (!isValidIsoDate(checkIn) || !isValidIsoDate(checkOut)) {
-    return res.status(400).json({ ok: false, error: 'checkIn/checkOut inválidos. Use formato ISO (YYYY-MM-DD).' });
+    return res.status(400).json({ ok: false, error: 'checkIn/checkOut invalidos. Use formato ISO (YYYY-MM-DD).' });
   }
-
   if (new Date(checkIn) >= new Date(checkOut)) {
     return res.status(400).json({ ok: false, error: 'checkOut deve ser posterior a checkIn.' });
   }
@@ -284,29 +386,25 @@ app.post('/api/reservations', (req, res) => {
   if (!RESERVATION_STATUSES.has(nextStatus)) {
     return res.status(400).json({
       ok: false,
-      error: 'status inválido. Valores permitidos: confirmed, cancelled, checked_in, checked_out'
+      error: 'status invalido. Valores permitidos: confirmed, cancelled, checked_in, checked_out'
     });
   }
 
   const db = readDb();
+  normalizeDomainCollections(db);
   const accommodation = db.accommodations.find((item) => item.id === accommodationId);
-
   if (!accommodation) {
-    return res.status(404).json({ ok: false, error: 'Alojamento não encontrado' });
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
   }
 
   const hasConflict = db.reservations.some((item) => {
-    if (item.accommodationId !== accommodationId) {
-      return false;
-    }
-    if (item.status === 'cancelled') {
+    if (item.accommodationId !== accommodationId || item.status === 'cancelled') {
       return false;
     }
     return hasDateRangeOverlap(item.checkIn, item.checkOut, checkIn, checkOut);
   });
-
   if (hasConflict) {
-    return res.status(409).json({ ok: false, error: 'Conflito de datas: já existe reserva para este intervalo.' });
+    return res.status(409).json({ ok: false, error: 'Conflito de datas: ja existe reserva para este intervalo.' });
   }
 
   const reservation = {
@@ -324,37 +422,38 @@ app.post('/api/reservations', (req, res) => {
   };
 
   db.reservations.push(reservation);
+  appendAuditLog(db, {
+    action: 'reservations.create',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'reservation', id: reservation.id },
+    metadata: {
+      accommodationId: reservation.accommodationId,
+      checkIn: reservation.checkIn,
+      checkOut: reservation.checkOut,
+      status: reservation.status
+    }
+  });
   writeDb(db);
-
   return res.status(201).json({ ok: true, data: reservation });
 });
 
 app.get('/api/reservations/:id', (req, res) => {
   const db = readDb();
+  normalizeDomainCollections(db);
   const reservation = db.reservations.find((item) => item.id === req.params.id);
-
   if (!reservation) {
-    return res.status(404).json({ ok: false, error: 'Reserva não encontrada' });
+    return res.status(404).json({ ok: false, error: 'Reserva nao encontrada' });
   }
-
   return res.json({ ok: true, data: reservation });
 });
 
 app.put('/api/reservations/:id', (req, res) => {
-  const {
-    guestName,
-    checkIn,
-    checkOut,
-    adults,
-    children,
-    source,
-    status
-  } = req.body || {};
+  const { guestName, checkIn, checkOut, adults, children, source, status } = req.body || {};
   const db = readDb();
+  normalizeDomainCollections(db);
   const index = db.reservations.findIndex((item) => item.id === req.params.id);
-
   if (index === -1) {
-    return res.status(404).json({ ok: false, error: 'Reserva não encontrada' });
+    return res.status(404).json({ ok: false, error: 'Reserva nao encontrada' });
   }
 
   const current = db.reservations[index];
@@ -364,24 +463,18 @@ app.put('/api/reservations/:id', (req, res) => {
   const nextStatus = status || current.status;
 
   if (!nextGuestName || !nextCheckIn || !nextCheckOut) {
-    return res.status(400).json({
-      ok: false,
-      error: 'Campos obrigatórios: guestName, checkIn, checkOut'
-    });
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: guestName, checkIn, checkOut' });
   }
-
   if (!isValidIsoDate(nextCheckIn) || !isValidIsoDate(nextCheckOut)) {
-    return res.status(400).json({ ok: false, error: 'checkIn/checkOut inválidos. Use formato ISO (YYYY-MM-DD).' });
+    return res.status(400).json({ ok: false, error: 'checkIn/checkOut invalidos. Use formato ISO (YYYY-MM-DD).' });
   }
-
   if (new Date(nextCheckIn) >= new Date(nextCheckOut)) {
     return res.status(400).json({ ok: false, error: 'checkOut deve ser posterior a checkIn.' });
   }
-
   if (!RESERVATION_STATUSES.has(nextStatus)) {
     return res.status(400).json({
       ok: false,
-      error: 'status inválido. Valores permitidos: confirmed, cancelled, checked_in, checked_out'
+      error: 'status invalido. Valores permitidos: confirmed, cancelled, checked_in, checked_out'
     });
   }
 
@@ -394,9 +487,8 @@ app.put('/api/reservations/:id', (req, res) => {
     }
     return hasDateRangeOverlap(item.checkIn, item.checkOut, nextCheckIn, nextCheckOut);
   });
-
   if (hasConflict) {
-    return res.status(409).json({ ok: false, error: 'Conflito de datas: já existe reserva para este intervalo.' });
+    return res.status(409).json({ ok: false, error: 'Conflito de datas: ja existe reserva para este intervalo.' });
   }
 
   const updatedReservation = {
@@ -412,6 +504,17 @@ app.put('/api/reservations/:id', (req, res) => {
   };
 
   db.reservations[index] = updatedReservation;
+  appendAuditLog(db, {
+    action: 'reservations.update',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'reservation', id: updatedReservation.id },
+    metadata: {
+      accommodationId: updatedReservation.accommodationId,
+      checkIn: updatedReservation.checkIn,
+      checkOut: updatedReservation.checkOut,
+      status: updatedReservation.status
+    }
+  });
   writeDb(db);
 
   return res.json({ ok: true, data: updatedReservation });
@@ -419,26 +522,30 @@ app.put('/api/reservations/:id', (req, res) => {
 
 app.patch('/api/reservations/:id/status', (req, res) => {
   const { status } = req.body || {};
-
   if (!status || !RESERVATION_STATUSES.has(status)) {
     return res.status(400).json({
       ok: false,
-      error: 'status inválido. Valores permitidos: confirmed, cancelled, checked_in, checked_out'
+      error: 'status invalido. Valores permitidos: confirmed, cancelled, checked_in, checked_out'
     });
   }
 
   const db = readDb();
+  normalizeDomainCollections(db);
   const index = db.reservations.findIndex((item) => item.id === req.params.id);
-
   if (index === -1) {
-    return res.status(404).json({ ok: false, error: 'Reserva não encontrada' });
+    return res.status(404).json({ ok: false, error: 'Reserva nao encontrada' });
   }
 
   const reservation = db.reservations[index];
   reservation.status = status;
   reservation.updatedAt = new Date().toISOString();
-
   db.reservations[index] = reservation;
+  appendAuditLog(db, {
+    action: 'reservations.update_status',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'reservation', id: reservation.id },
+    metadata: { status: reservation.status }
+  });
   writeDb(db);
 
   return res.json({ ok: true, data: reservation });
@@ -446,13 +553,19 @@ app.patch('/api/reservations/:id/status', (req, res) => {
 
 app.delete('/api/reservations/:id', (req, res) => {
   const db = readDb();
+  normalizeDomainCollections(db);
   const index = db.reservations.findIndex((item) => item.id === req.params.id);
-
   if (index === -1) {
-    return res.status(404).json({ ok: false, error: 'Reserva não encontrada' });
+    return res.status(404).json({ ok: false, error: 'Reserva nao encontrada' });
   }
 
   const [removed] = db.reservations.splice(index, 1);
+  appendAuditLog(db, {
+    action: 'reservations.delete',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'reservation', id: removed.id },
+    metadata: { accommodationId: removed.accommodationId }
+  });
   writeDb(db);
 
   return res.json({ ok: true, data: removed, message: 'Reserva removida com sucesso.' });
@@ -460,26 +573,24 @@ app.delete('/api/reservations/:id', (req, res) => {
 
 app.get('/api/calendar', (req, res) => {
   const { accommodationId, dateFrom, dateTo } = req.query || {};
-
   if (!accommodationId) {
-    return res.status(400).json({ ok: false, error: 'Campo obrigatório: accommodationId' });
+    return res.status(400).json({ ok: false, error: 'Campo obrigatorio: accommodationId' });
   }
-
   if (!dateFrom || !dateTo || !isValidIsoDate(dateFrom) || !isValidIsoDate(dateTo)) {
     return res.status(400).json({
       ok: false,
-      error: 'Campos obrigatórios: dateFrom e dateTo em formato ISO (YYYY-MM-DD).'
+      error: 'Campos obrigatorios: dateFrom e dateTo em formato ISO (YYYY-MM-DD).'
     });
   }
-
   if (new Date(dateFrom) >= new Date(dateTo)) {
     return res.status(400).json({ ok: false, error: 'dateTo deve ser posterior a dateFrom.' });
   }
 
   const db = readDb();
+  normalizeDomainCollections(db);
   const accommodation = db.accommodations.find((item) => item.id === accommodationId);
   if (!accommodation) {
-    return res.status(404).json({ ok: false, error: 'Alojamento não encontrado' });
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
   }
 
   const reservations = db.reservations.filter((item) => {
@@ -489,48 +600,38 @@ app.get('/api/calendar', (req, res) => {
     return hasDateRangeOverlap(item.checkIn, item.checkOut, dateFrom, dateTo);
   });
 
-  return res.json({
-    ok: true,
-    data: {
-      accommodationId,
-      dateFrom,
-      dateTo,
-      reservations
-    }
-  });
+  return res.json({ ok: true, data: { accommodationId, dateFrom, dateTo, reservations } });
 });
 
 app.patch('/api/accommodations/:id/booking-connection', async (req, res) => {
   const { enabled, hotelId, force } = req.body || {};
-
   if (typeof enabled !== 'boolean') {
-    return res.status(400).json({ ok: false, error: 'Campo obrigatório: enabled (boolean)' });
+    return res.status(400).json({ ok: false, error: 'Campo obrigatorio: enabled (boolean)' });
   }
 
   const db = readDb();
+  normalizeDomainCollections(db);
   const index = db.accommodations.findIndex((item) => item.id === req.params.id);
-
   if (index === -1) {
-    return res.status(404).json({ ok: false, error: 'Alojamento não encontrado' });
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
   }
 
   const accommodation = db.accommodations[index];
-
   if (enabled && !hotelId && !accommodation.bookingConnection.hotelId) {
-    return res.status(400).json({ ok: false, error: 'hotelId é obrigatório para ligar o alojamento à Booking API' });
+    return res.status(400).json({ ok: false, error: 'hotelId e obrigatorio para ligar o alojamento a Booking API' });
   }
 
   const nextHotelId = hotelId || accommodation.bookingConnection.hotelId || null;
   const check = enabled
     ? await pingBookingConnection({ hotelId: nextHotelId })
-    : { ok: true, message: 'Conexão Booking desligada manualmente.' };
+    : { ok: true, message: 'Conexao Booking desligada manualmente.' };
 
   if (enabled && !check.ok && !force) {
     return res.status(502).json({
       ok: false,
       error: check.message,
       details: check.details || null,
-      hint: 'Use force=true para guardar ligação mesmo com falha de validação.'
+      hint: 'Use force=true para guardar ligacao mesmo com falha de validacao.'
     });
   }
 
@@ -542,7 +643,6 @@ app.patch('/api/accommodations/:id/booking-connection', async (req, res) => {
     statusMessage: check.ok ? check.message : `Ligado com aviso: ${check.message}`
   };
   accommodation.updatedAt = new Date().toISOString();
-
   db.accommodations[index] = accommodation;
   writeDb(db);
 
@@ -551,15 +651,14 @@ app.patch('/api/accommodations/:id/booking-connection', async (req, res) => {
 
 app.post('/api/accommodations/:id/booking-sync', async (req, res) => {
   const db = readDb();
+  normalizeDomainCollections(db);
   const index = db.accommodations.findIndex((item) => item.id === req.params.id);
-
   if (index === -1) {
-    return res.status(404).json({ ok: false, error: 'Alojamento não encontrado' });
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
   }
 
   const accommodation = db.accommodations[index];
   const result = await syncAccommodation(accommodation.bookingConnection, req.body || null);
-
   if (!result.ok) {
     return res.status(502).json({ ok: false, error: result.message, details: result.details || null });
   }
@@ -567,7 +666,6 @@ app.post('/api/accommodations/:id/booking-sync', async (req, res) => {
   accommodation.bookingConnection.lastSyncAt = new Date().toISOString();
   accommodation.bookingConnection.statusMessage = result.message;
   accommodation.updatedAt = new Date().toISOString();
-
   db.accommodations[index] = accommodation;
   writeDb(db);
 
@@ -575,14 +673,11 @@ app.post('/api/accommodations/:id/booking-sync', async (req, res) => {
 });
 
 app.get('/api/legal/complaints-book-link', (req, res) => {
-  res.json({
-    ok: true,
-    url: 'https://www.livroreclamacoes.pt/Inicio/'
-  });
+  res.json({ ok: true, url: 'https://www.livroreclamacoes.pt/Inicio/' });
 });
 
 app.use((req, res) => {
-  return res.status(404).json({ ok: false, error: 'Endpoint não encontrado' });
+  return res.status(404).json({ ok: false, error: 'Endpoint nao encontrado' });
 });
 
 if (require.main === module) {

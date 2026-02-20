@@ -41,7 +41,8 @@ function resetDb() {
         updatedAt: new Date().toISOString()
       }
     ],
-    reservations: []
+    reservations: [],
+    auditLogs: []
   };
 
   fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2), 'utf8');
@@ -72,6 +73,13 @@ async function loginAsAdmin(server) {
     password: process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD
   });
 
+  assert.equal(response.status, 200);
+  assert.equal(response.json.ok, true);
+  return response.json.token;
+}
+
+async function login(server, email, password) {
+  const response = await request(server, 'POST', '/api/auth/login', { email, password });
   assert.equal(response.status, 200);
   assert.equal(response.json.ok, true);
   return response.json.token;
@@ -151,6 +159,93 @@ test('POST /api/auth/change-password rejects wrong current password', async () =
 
   assert.equal(changed.status, 401);
   assert.equal(changed.json.ok, false);
+});
+
+test('POST /api/users allows admin to create manager', async () => {
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/users',
+    {
+      name: 'Gestor Teste',
+      email: 'gestor@test.local',
+      password: 'manager-password-123',
+      role: 'manager'
+    },
+    token
+  );
+
+  assert.equal(created.status, 201);
+  assert.equal(created.json.ok, true);
+  assert.equal(created.json.data.role, 'manager');
+});
+
+test('GET /api/users blocks manager role', async () => {
+  const adminToken = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/users',
+    {
+      name: 'Gestor Teste',
+      email: 'gestor2@test.local',
+      password: 'manager-password-123',
+      role: 'manager'
+    },
+    adminToken
+  );
+
+  const managerToken = await login(server, 'gestor2@test.local', 'manager-password-123');
+  const usersList = await request(server, 'GET', '/api/users', null, managerToken);
+
+  assert.equal(usersList.status, 403);
+  assert.equal(usersList.json.ok, false);
+});
+
+test('GET /api/audit-logs returns critical events for admin', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Audit Cliente',
+      checkIn: '2026-08-10',
+      checkOut: '2026-08-12'
+    },
+    token
+  );
+
+  const logsResponse = await request(server, 'GET', '/api/audit-logs?limit=20', null, token);
+  assert.equal(logsResponse.status, 200);
+  assert.equal(logsResponse.json.ok, true);
+
+  const actions = logsResponse.json.data.map((item) => item.action);
+  assert.equal(actions.includes('auth.login.success'), true);
+  assert.equal(actions.includes('reservations.create'), true);
+});
+
+test('GET /api/audit-logs blocks manager role', async () => {
+  const adminToken = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/users',
+    {
+      name: 'Gestor Audit',
+      email: 'gestor-audit@test.local',
+      password: 'manager-password-123',
+      role: 'manager'
+    },
+    adminToken
+  );
+
+  const managerToken = await login(server, 'gestor-audit@test.local', 'manager-password-123');
+  const response = await request(server, 'GET', '/api/audit-logs', null, managerToken);
+  assert.equal(response.status, 403);
+  assert.equal(response.json.ok, false);
 });
 
 test('POST /api/reservations creates valid reservation', async () => {

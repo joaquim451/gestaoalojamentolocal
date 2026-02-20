@@ -24,6 +24,24 @@ Base URL local: `http://localhost:3000`
 - Todos os endpoints `/api/*` exceto `/api/auth/login` requerem header:
   - `Authorization: Bearer <token>`
 
+## Utilizadores
+- `GET /api/users` (apenas role `admin`)
+- `POST /api/users` (apenas role `admin`)
+```json
+{
+  "name": "Gestor Operacional",
+  "email": "gestor@empresa.pt",
+  "password": "password-segura-123",
+  "role": "manager"
+}
+```
+- `role` permitida: `admin`, `manager`
+
+## Auditoria
+- `GET /api/audit-logs` (apenas role `admin`)
+  - filtros opcionais: `action`, `userId`, `limit` (max 500)
+  - devolve eventos por ordem mais recente primeiro
+
 ## Configuração Booking
 - `GET /api/config/booking`
 - Retorna apenas metadados (sem password), incluindo `hasCredentials`.
