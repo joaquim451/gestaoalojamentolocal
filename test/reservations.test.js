@@ -372,6 +372,44 @@ test('GET /api/audit-logs returns critical events for admin', async () => {
   assert.equal(actions.includes('reservations.create'), true);
 });
 
+test('GET /api/audit-logs supports pagination metadata', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Audit Page 1',
+      checkIn: '2026-11-10',
+      checkOut: '2026-11-12'
+    },
+    token
+  );
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Audit Page 2',
+      checkIn: '2026-11-13',
+      checkOut: '2026-11-15'
+    },
+    token
+  );
+
+  const firstPage = await request(server, 'GET', '/api/audit-logs?page=1&pageSize=1', null, token);
+  const secondPage = await request(server, 'GET', '/api/audit-logs?page=2&pageSize=1', null, token);
+
+  assert.equal(firstPage.status, 200);
+  assert.equal(secondPage.status, 200);
+  assert.equal(firstPage.json.meta.page, 1);
+  assert.equal(firstPage.json.meta.pageSize, 1);
+  assert.equal(secondPage.json.meta.page, 2);
+  assert.equal(firstPage.json.data[0].id === secondPage.json.data[0].id, false);
+});
+
 test('GET /api/audit-logs blocks manager role', async () => {
   const adminToken = await loginAsAdmin(server);
   await request(
@@ -412,6 +450,38 @@ test('PUT /api/accommodations/:id updates accommodation fields', async () => {
   assert.equal(updated.json.ok, true);
   assert.equal(updated.json.data.name, 'Alojamento Teste Atualizado');
   assert.equal(updated.json.data.city, 'Porto');
+});
+
+test('GET /api/accommodations supports sorting and pagination', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/accommodations',
+    { name: 'B Casa', city: 'Braga' },
+    token
+  );
+  await request(
+    server,
+    'POST',
+    '/api/accommodations',
+    { name: 'A Casa', city: 'Aveiro' },
+    token
+  );
+
+  const response = await request(
+    server,
+    'GET',
+    '/api/accommodations?sortBy=name&sortDir=asc&page=1&pageSize=2',
+    null,
+    token
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.json.meta.page, 1);
+  assert.equal(response.json.meta.pageSize, 2);
+  assert.equal(response.json.data.length, 2);
+  assert.equal(response.json.data[0].name, 'A Casa');
 });
 
 test('DELETE /api/accommodations/:id blocks when active reservations exist', async () => {
@@ -616,6 +686,60 @@ test('GET /api/reservations filters by status and date range', async () => {
   assert.equal(filtered.status, 200);
   assert.equal(filtered.json.data.length, 1);
   assert.equal(filtered.json.data[0].status, 'cancelled');
+});
+
+test('GET /api/reservations supports sorting and pagination', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Pag 1',
+      checkIn: '2026-12-01',
+      checkOut: '2026-12-03'
+    },
+    token
+  );
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Pag 2',
+      checkIn: '2026-12-04',
+      checkOut: '2026-12-06'
+    },
+    token
+  );
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Pag 3',
+      checkIn: '2026-12-07',
+      checkOut: '2026-12-09'
+    },
+    token
+  );
+
+  const response = await request(
+    server,
+    'GET',
+    '/api/reservations?sortBy=checkIn&sortDir=asc&page=2&pageSize=2',
+    null,
+    token
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.json.meta.page, 2);
+  assert.equal(response.json.meta.pageSize, 2);
+  assert.equal(response.json.data.length, 1);
+  assert.equal(response.json.data[0].guestName, 'Pag 3');
 });
 
 test('PATCH /api/reservations/:id/status updates state', async () => {

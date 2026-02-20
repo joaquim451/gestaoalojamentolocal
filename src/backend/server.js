@@ -109,6 +109,52 @@ function appendAuditLog(db, event) {
   });
 }
 
+function parsePositiveInt(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function parseSortDir(value, fallback = 'desc') {
+  return String(value || '').toLowerCase() === 'asc' ? 'asc' : fallback;
+}
+
+function compareValues(a, b) {
+  const aDate = Date.parse(a);
+  const bDate = Date.parse(b);
+  const bothDates = !Number.isNaN(aDate) && !Number.isNaN(bDate);
+  if (bothDates) {
+    return aDate - bDate;
+  }
+
+  const aNumber = Number(a);
+  const bNumber = Number(b);
+  const bothNumbers = !Number.isNaN(aNumber) && !Number.isNaN(bNumber);
+  if (bothNumbers) {
+    return aNumber - bNumber;
+  }
+
+  return String(a || '').localeCompare(String(b || ''), 'pt-PT', { sensitivity: 'base' });
+}
+
+function sortItems(items, sortBy, sortDir) {
+  const direction = sortDir === 'asc' ? 1 : -1;
+  return [...items].sort((left, right) => direction * compareValues(left[sortBy], right[sortBy]));
+}
+
+function paginateItems(items, page, pageSize) {
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * pageSize;
+  return {
+    data: items.slice(start, start + pageSize),
+    meta: { page: safePage, pageSize, total, totalPages }
+  };
+}
+
 function serializeUser(user) {
   return {
     id: user.id,
@@ -492,7 +538,7 @@ app.post('/api/users', requireRole('admin'), (req, res) => {
 });
 
 app.get('/api/audit-logs', requireRole('admin'), (req, res) => {
-  const { action, userId, limit } = req.query || {};
+  const { action, userId, limit, page, pageSize, sortBy, sortDir } = req.query || {};
   const db = readDb();
   normalizeAuditLogsCollection(db);
 
@@ -504,9 +550,28 @@ app.get('/api/audit-logs', requireRole('admin'), (req, res) => {
     logs = logs.filter((item) => item.actor && item.actor.userId === userId);
   }
 
-  const max = Math.min(Number(limit) || 100, 500);
-  const data = [...logs].reverse().slice(0, max);
-  return res.json({ ok: true, data });
+  const allowedSortFields = new Set(['at', 'action']);
+  const selectedSortBy = allowedSortFields.has(sortBy) ? sortBy : 'at';
+  const selectedSortDir = parseSortDir(sortDir, 'desc');
+  const sorted = sortItems(logs, selectedSortBy, selectedSortDir);
+
+  if (limit !== undefined && !page && !pageSize) {
+    const max = Math.min(Number(limit) || 100, 500);
+    return res.json({
+      ok: true,
+      data: sorted.slice(0, max),
+      meta: { page: 1, pageSize: max, total: sorted.length, totalPages: 1, sortBy: selectedSortBy, sortDir: selectedSortDir }
+    });
+  }
+
+  const selectedPage = parsePositiveInt(page, 1, 1, 100000);
+  const selectedPageSize = parsePositiveInt(pageSize, 50, 1, 200);
+  const paginated = paginateItems(sorted, selectedPage, selectedPageSize);
+  return res.json({
+    ok: true,
+    data: paginated.data,
+    meta: { ...paginated.meta, sortBy: selectedSortBy, sortDir: selectedSortDir }
+  });
 });
 
 app.get('/api/config/booking', requireRole('admin'), (req, res) => {
@@ -514,9 +579,23 @@ app.get('/api/config/booking', requireRole('admin'), (req, res) => {
 });
 
 app.get('/api/accommodations', (req, res) => {
+  const { page, pageSize, sortBy, sortDir } = req.query || {};
   const db = readDb();
   normalizeDomainCollections(db);
-  res.json({ ok: true, data: db.accommodations });
+  const allowedSortFields = new Set(['name', 'city', 'municipality', 'createdAt', 'updatedAt']);
+  const selectedSortBy = allowedSortFields.has(sortBy) ? sortBy : 'createdAt';
+  const selectedSortDir = parseSortDir(sortDir, 'desc');
+  const selectedPage = parsePositiveInt(page, 1, 1, 100000);
+  const selectedPageSize = parsePositiveInt(pageSize, 50, 1, 200);
+
+  const sorted = sortItems(db.accommodations, selectedSortBy, selectedSortDir);
+  const paginated = paginateItems(sorted, selectedPage, selectedPageSize);
+
+  res.json({
+    ok: true,
+    data: paginated.data,
+    meta: { ...paginated.meta, sortBy: selectedSortBy, sortDir: selectedSortDir }
+  });
 });
 
 app.post('/api/accommodations', (req, res) => {
@@ -660,7 +739,7 @@ app.delete('/api/accommodations/:id', (req, res) => {
 });
 
 app.get('/api/reservations', (req, res) => {
-  const { accommodationId, dateFrom, dateTo, status } = req.query || {};
+  const { accommodationId, dateFrom, dateTo, status, page, pageSize, sortBy, sortDir } = req.query || {};
   const db = readDb();
   normalizeDomainCollections(db);
 
@@ -680,7 +759,20 @@ app.get('/api/reservations', (req, res) => {
     data = data.filter((item) => hasDateRangeOverlap(item.checkIn, item.checkOut, fromDate, toDate));
   }
 
-  return res.json({ ok: true, data });
+  const allowedSortFields = new Set(['checkIn', 'checkOut', 'createdAt', 'updatedAt', 'guestName', 'status']);
+  const selectedSortBy = allowedSortFields.has(sortBy) ? sortBy : 'checkIn';
+  const selectedSortDir = parseSortDir(sortDir, 'asc');
+  const selectedPage = parsePositiveInt(page, 1, 1, 100000);
+  const selectedPageSize = parsePositiveInt(pageSize, 50, 1, 200);
+
+  const sorted = sortItems(data, selectedSortBy, selectedSortDir);
+  const paginated = paginateItems(sorted, selectedPage, selectedPageSize);
+
+  return res.json({
+    ok: true,
+    data: paginated.data,
+    meta: { ...paginated.meta, sortBy: selectedSortBy, sortDir: selectedSortDir }
+  });
 });
 
 app.post('/api/reservations', (req, res) => {

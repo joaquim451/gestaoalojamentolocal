@@ -58,7 +58,7 @@ ou
 
 ## Auditoria
 - `GET /api/audit-logs` (apenas role `admin`)
-  - filtros opcionais: `action`, `userId`, `limit` (max 500)
+  - filtros opcionais: `action`, `userId`, `limit` (max 500), `page`, `pageSize`, `sortBy`, `sortDir`
   - devolve eventos por ordem mais recente primeiro
 
 ## Configuração Booking
@@ -67,6 +67,7 @@ ou
 
 ## Alojamentos
 - `GET /api/accommodations`
+  - query opcionais: `page`, `pageSize`, `sortBy`, `sortDir`
 - `POST /api/accommodations`
   - body mínimo:
 ```json
@@ -84,6 +85,7 @@ ou
 ## Reservas
 - `GET /api/reservations`
   - filtros opcionais: `accommodationId`, `status`, `dateFrom`, `dateTo`
+  - paginação/ordenação opcionais: `page`, `pageSize`, `sortBy`, `sortDir`
 - `POST /api/reservations`
   - body mínimo:
 ```json
