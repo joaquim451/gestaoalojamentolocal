@@ -1263,6 +1263,123 @@ test('availability overrides supports upsert update, list and delete', async () 
   assert.equal(deleted.status, 200);
 });
 
+test('POST /api/reservations blocks closed dates from availability rules', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-03-11',
+      endDate: '2026-03-11',
+      closed: true
+    },
+    token
+  );
+
+  const created = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Fecho',
+      checkIn: '2026-03-10',
+      checkOut: '2026-03-12'
+    },
+    token
+  );
+
+  assert.equal(created.status, 409);
+  assert.equal(created.json.ok, false);
+});
+
+test('POST /api/reservations allows date when override reopens closed day', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-03-11',
+      endDate: '2026-03-11',
+      closed: true
+    },
+    token
+  );
+  await request(
+    server,
+    'POST',
+    '/api/availability-overrides',
+    {
+      accommodationId: 'acc_test_1',
+      date: '2026-03-11',
+      closed: false
+    },
+    token
+  );
+
+  const created = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Reaberta',
+      checkIn: '2026-03-10',
+      checkOut: '2026-03-12'
+    },
+    token
+  );
+
+  assert.equal(created.status, 201);
+  assert.equal(created.json.ok, true);
+});
+
+test('PUT /api/reservations/:id blocks update when availability rules reject new dates', async () => {
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Atualizar',
+      checkIn: '2026-03-10',
+      checkOut: '2026-03-12'
+    },
+    token
+  );
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-03-01',
+      endDate: '2026-03-31',
+      allowedArrivalWeekdays: [1]
+    },
+    token
+  );
+
+  const updated = await request(
+    server,
+    'PUT',
+    `/api/reservations/${created.json.data.id}`,
+    {
+      checkIn: '2026-03-03',
+      checkOut: '2026-03-05'
+    },
+    token
+  );
+
+  assert.equal(updated.status, 409);
+  assert.equal(updated.json.ok, false);
+});
+
 test('POST /api/reservations creates valid reservation', async () => {
   const token = await loginAsAdmin(server);
   const response = await request(

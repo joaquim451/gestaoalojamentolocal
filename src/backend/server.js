@@ -180,6 +180,189 @@ function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
 }
 
+function validateStayAgainstAvailability(db, accommodationId, checkIn, checkOut) {
+  const nights = countNights(checkIn, checkOut);
+  const checkInDateStr = formatIsoDateOnly(checkIn);
+  const checkOutDateStr = formatIsoDateOnly(checkOut);
+  const arrivalOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, checkInDateStr);
+  const departureOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, checkOutDateStr);
+  const arrivalConstraints = applyAvailabilityOverride(
+    pickAvailabilityConstraints(db.availabilityRules, accommodationId, checkInDateStr),
+    arrivalOverride
+  );
+  const departureConstraints = applyAvailabilityOverride(
+    pickAvailabilityConstraints(db.availabilityRules, accommodationId, checkOutDateStr),
+    departureOverride
+  );
+
+  const checkInDay = new Date(checkIn).getUTCDay();
+  const checkOutDay = new Date(checkOut).getUTCDay();
+  const now = getNow();
+  const hoursUntilCheckIn = (new Date(checkIn) - now) / (60 * 60 * 1000);
+  const daysUntilCheckIn = (new Date(checkIn) - now) / (24 * 60 * 60 * 1000);
+
+  const effectiveMinAdvanceHours = Math.max(
+    Number(arrivalConstraints.minAdvanceHours || 0),
+    Number(departureConstraints.minAdvanceHours || 0)
+  );
+  const effectiveMaxAdvanceDaysCandidates = [
+    Number(arrivalConstraints.maxAdvanceDays || 0),
+    Number(departureConstraints.maxAdvanceDays || 0)
+  ].filter((value) => value > 0);
+  const effectiveMaxAdvanceDays = effectiveMaxAdvanceDaysCandidates.length > 0
+    ? Math.min(...effectiveMaxAdvanceDaysCandidates)
+    : 0;
+
+  if (arrivalConstraints.closedToArrival) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Check-in indisponivel em ${checkInDateStr} (closedToArrival).`,
+      details: {
+        date: checkInDateStr,
+        matchingRuleIds: arrivalConstraints.matchingRuleIds,
+        appliedOverrideId: arrivalConstraints.appliedOverrideId
+      }
+    };
+  }
+  if (departureConstraints.closedToDeparture) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Check-out indisponivel em ${checkOutDateStr} (closedToDeparture).`,
+      details: {
+        date: checkOutDateStr,
+        matchingRuleIds: departureConstraints.matchingRuleIds,
+        appliedOverrideId: departureConstraints.appliedOverrideId
+      }
+    };
+  }
+  if (
+    arrivalConstraints.allowedArrivalWeekdays.length > 0
+    && !arrivalConstraints.allowedArrivalWeekdays.includes(checkInDay)
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Check-in nao permitido no dia da semana ${checkInDay}.`,
+      details: {
+        checkInDay,
+        allowedArrivalWeekdays: arrivalConstraints.allowedArrivalWeekdays,
+        appliedOverrideId: arrivalConstraints.appliedOverrideId
+      }
+    };
+  }
+  if (
+    departureConstraints.allowedDepartureWeekdays.length > 0
+    && !departureConstraints.allowedDepartureWeekdays.includes(checkOutDay)
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Check-out nao permitido no dia da semana ${checkOutDay}.`,
+      details: {
+        checkOutDay,
+        allowedDepartureWeekdays: departureConstraints.allowedDepartureWeekdays,
+        appliedOverrideId: departureConstraints.appliedOverrideId
+      }
+    };
+  }
+  if (effectiveMinAdvanceHours > 0 && hoursUntilCheckIn < effectiveMinAdvanceHours) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Reserva requer antecedencia minima de ${effectiveMinAdvanceHours} horas.`,
+      details: {
+        effectiveMinAdvanceHours,
+        hoursUntilCheckIn: Number(hoursUntilCheckIn.toFixed(2))
+      }
+    };
+  }
+  if (effectiveMaxAdvanceDays > 0 && daysUntilCheckIn > effectiveMaxAdvanceDays) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Reserva permite antecedencia maxima de ${effectiveMaxAdvanceDays} dias.`,
+      details: {
+        effectiveMaxAdvanceDays,
+        daysUntilCheckIn: Number(daysUntilCheckIn.toFixed(2))
+      }
+    };
+  }
+
+  const nightlyConstraints = [];
+  let minNightsFromRules = 0;
+  let maxNightsFromRules = 0;
+  const triggeredRuleIds = new Set();
+  const triggeredOverrideIds = new Set();
+
+  for (let i = 0; i < nights; i += 1) {
+    const date = addDays(checkIn, i);
+    const dateStr = formatIsoDateOnly(date);
+    const dateOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, dateStr);
+    const availability = applyAvailabilityOverride(
+      pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr),
+      dateOverride
+    );
+    if (availability.closed) {
+      return {
+        ok: false,
+        status: 409,
+        error: `Data indisponivel para reserva: ${dateStr}.`,
+        details: {
+          date: dateStr,
+          matchingRuleIds: availability.matchingRuleIds,
+          appliedOverrideId: availability.appliedOverrideId
+        }
+      };
+    }
+    minNightsFromRules = Math.max(minNightsFromRules, availability.minNights);
+    maxNightsFromRules = maxNightsFromRules === 0
+      ? availability.maxNights
+      : (availability.maxNights > 0 ? Math.min(maxNightsFromRules, availability.maxNights) : maxNightsFromRules);
+    availability.matchingRuleIds.forEach((id) => triggeredRuleIds.add(id));
+    if (availability.appliedOverrideId) {
+      triggeredOverrideIds.add(availability.appliedOverrideId);
+    }
+    nightlyConstraints.push({ date: dateStr, dayOfWeek: date.getUTCDay(), availability });
+  }
+
+  if (nights < minNightsFromRules) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Estadia minima: ${minNightsFromRules} noites.`,
+      details: { minNightsFromRules, nights }
+    };
+  }
+  if (maxNightsFromRules > 0 && nights > maxNightsFromRules) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Estadia maxima: ${maxNightsFromRules} noites.`,
+      details: { maxNightsFromRules, nights }
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      nights,
+      checkInDateStr,
+      checkOutDateStr,
+      arrivalConstraints,
+      departureConstraints,
+      effectiveMinAdvanceHours,
+      effectiveMaxAdvanceDays,
+      minNightsFromRules,
+      maxNightsFromRules,
+      nightlyConstraints,
+      triggeredAvailabilityRuleIds: [...triggeredRuleIds],
+      triggeredAvailabilityOverrideIds: [...triggeredOverrideIds]
+    }
+  };
+}
+
 function normalizeUsersCollection(db) {
   if (!Array.isArray(db.users)) {
     db.users = [];
@@ -1363,133 +1546,36 @@ app.post('/api/rate-quote', (req, res) => {
     return res.status(404).json({ ok: false, error: 'Rate plan nao encontrado para este alojamento.' });
   }
 
-  const nights = countNights(checkIn, checkOut);
   const minNightsFromPlan = Number(plan.minNights || 1);
-  const checkInDateStr = formatIsoDateOnly(checkIn);
-  const checkOutDateStr = formatIsoDateOnly(checkOut);
-  const arrivalOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, checkInDateStr);
-  const departureOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, checkOutDateStr);
-  const arrivalConstraints = applyAvailabilityOverride(
-    pickAvailabilityConstraints(db.availabilityRules, accommodationId, checkInDateStr),
-    arrivalOverride
-  );
-  const departureConstraints = applyAvailabilityOverride(
-    pickAvailabilityConstraints(db.availabilityRules, accommodationId, checkOutDateStr),
-    departureOverride
-  );
-  const checkInDay = new Date(checkIn).getUTCDay();
-  const checkOutDay = new Date(checkOut).getUTCDay();
-  const now = getNow();
-  const hoursUntilCheckIn = (new Date(checkIn) - now) / (60 * 60 * 1000);
-  const daysUntilCheckIn = (new Date(checkIn) - now) / (24 * 60 * 60 * 1000);
+  const availabilityValidation = validateStayAgainstAvailability(db, accommodationId, checkIn, checkOut);
+  if (!availabilityValidation.ok) {
+    return res.status(availabilityValidation.status).json({
+      ok: false,
+      error: availabilityValidation.error,
+      details: availabilityValidation.details
+    });
+  }
 
-  const effectiveMinAdvanceHours = Math.max(
-    Number(arrivalConstraints.minAdvanceHours || 0),
-    Number(departureConstraints.minAdvanceHours || 0)
-  );
-  const effectiveMaxAdvanceDaysCandidates = [
-    Number(arrivalConstraints.maxAdvanceDays || 0),
-    Number(departureConstraints.maxAdvanceDays || 0)
-  ].filter((value) => value > 0);
-  const effectiveMaxAdvanceDays = effectiveMaxAdvanceDaysCandidates.length > 0
-    ? Math.min(...effectiveMaxAdvanceDaysCandidates)
-    : 0;
-
-  if (arrivalConstraints.closedToArrival) {
-    return res.status(409).json({
-      ok: false,
-      error: `Check-in indisponivel em ${checkInDateStr} (closedToArrival).`,
-      details: {
-        date: checkInDateStr,
-        matchingRuleIds: arrivalConstraints.matchingRuleIds,
-        appliedOverrideId: arrivalConstraints.appliedOverrideId
-      }
-    });
-  }
-  if (departureConstraints.closedToDeparture) {
-    return res.status(409).json({
-      ok: false,
-      error: `Check-out indisponivel em ${checkOutDateStr} (closedToDeparture).`,
-      details: {
-        date: checkOutDateStr,
-        matchingRuleIds: departureConstraints.matchingRuleIds,
-        appliedOverrideId: departureConstraints.appliedOverrideId
-      }
-    });
-  }
-  if (
-    arrivalConstraints.allowedArrivalWeekdays.length > 0
-    && !arrivalConstraints.allowedArrivalWeekdays.includes(checkInDay)
-  ) {
-    return res.status(409).json({
-      ok: false,
-      error: `Check-in nao permitido no dia da semana ${checkInDay}.`,
-      details: { checkInDay, allowedArrivalWeekdays: arrivalConstraints.allowedArrivalWeekdays }
-    });
-  }
-  if (
-    departureConstraints.allowedDepartureWeekdays.length > 0
-    && !departureConstraints.allowedDepartureWeekdays.includes(checkOutDay)
-  ) {
-    return res.status(409).json({
-      ok: false,
-      error: `Check-out nao permitido no dia da semana ${checkOutDay}.`,
-      details: { checkOutDay, allowedDepartureWeekdays: departureConstraints.allowedDepartureWeekdays }
-    });
-  }
-  if (effectiveMinAdvanceHours > 0 && hoursUntilCheckIn < effectiveMinAdvanceHours) {
-    return res.status(409).json({
-      ok: false,
-      error: `Reserva requer antecedencia minima de ${effectiveMinAdvanceHours} horas.`,
-      details: { effectiveMinAdvanceHours, hoursUntilCheckIn: Number(hoursUntilCheckIn.toFixed(2)) }
-    });
-  }
-  if (effectiveMaxAdvanceDays > 0 && daysUntilCheckIn > effectiveMaxAdvanceDays) {
-    return res.status(409).json({
-      ok: false,
-      error: `Reserva permite antecedencia maxima de ${effectiveMaxAdvanceDays} dias.`,
-      details: { effectiveMaxAdvanceDays, daysUntilCheckIn: Number(daysUntilCheckIn.toFixed(2)) }
-    });
-  }
+  const {
+    nights,
+    arrivalConstraints,
+    departureConstraints,
+    effectiveMinAdvanceHours,
+    effectiveMaxAdvanceDays,
+    minNightsFromRules,
+    maxNightsFromRules,
+    nightlyConstraints,
+    triggeredAvailabilityRuleIds,
+    triggeredAvailabilityOverrideIds
+  } = availabilityValidation.data;
 
   const safeAdults = Number.isFinite(Number(adults)) ? Number(adults) : 1;
   const safeChildren = Number.isFinite(Number(children)) ? Number(children) : 0;
   const perNightDetails = [];
   let subtotal = 0;
-  let minNightsFromRules = 0;
-  let maxNightsFromRules = 0;
-  const triggeredRuleIds = new Set();
-  const triggeredOverrideIds = new Set();
 
-  for (let i = 0; i < nights; i += 1) {
-    const date = addDays(checkIn, i);
-    const dateStr = formatIsoDateOnly(date);
-    const dateOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, dateStr);
-    const availability = applyAvailabilityOverride(
-      pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr),
-      dateOverride
-    );
-    if (availability.closed) {
-      return res.status(409).json({
-        ok: false,
-        error: `Data indisponivel para reserva: ${dateStr}.`,
-        details: {
-          date: dateStr,
-          matchingRuleIds: availability.matchingRuleIds,
-          appliedOverrideId: availability.appliedOverrideId
-        }
-      });
-    }
-    minNightsFromRules = Math.max(minNightsFromRules, availability.minNights);
-    maxNightsFromRules = maxNightsFromRules === 0
-      ? availability.maxNights
-      : (availability.maxNights > 0 ? Math.min(maxNightsFromRules, availability.maxNights) : maxNightsFromRules);
-    availability.matchingRuleIds.forEach((id) => triggeredRuleIds.add(id));
-    if (availability.appliedOverrideId) {
-      triggeredOverrideIds.add(availability.appliedOverrideId);
-    }
-
-    const dayOfWeek = date.getUTCDay();
+  for (const nightly of nightlyConstraints) {
+    const { date: dateStr, dayOfWeek, availability } = nightly;
     const isWeekend = dayOfWeek === 5 || dayOfWeek === 6;
     const weekendMult = isWeekend ? Number(plan.weekendMultiplier || 1) : 1;
     const seasonalMult = pickSeasonalMultiplier(plan.seasonalAdjustments, dateStr);
@@ -1516,13 +1602,6 @@ app.post('/api/rate-quote', (req, res) => {
       ok: false,
       error: `Estadia minima: ${effectiveMinNights} noites.`,
       details: { minNightsFromPlan, minNightsFromRules, nights }
-    });
-  }
-  if (maxNightsFromRules > 0 && nights > maxNightsFromRules) {
-    return res.status(400).json({
-      ok: false,
-      error: `Estadia maxima: ${maxNightsFromRules} noites.`,
-      details: { maxNightsFromRules, nights }
     });
   }
 
@@ -1557,8 +1636,8 @@ app.post('/api/rate-quote', (req, res) => {
         allowedDepartureWeekdays: departureConstraints.allowedDepartureWeekdays,
         arrivalOverrideId: arrivalConstraints.appliedOverrideId,
         departureOverrideId: departureConstraints.appliedOverrideId,
-        triggeredAvailabilityRuleIds: [...triggeredRuleIds],
-        triggeredAvailabilityOverrideIds: [...triggeredOverrideIds]
+        triggeredAvailabilityRuleIds,
+        triggeredAvailabilityOverrideIds
       },
       perNightDetails,
       pricing: {
@@ -1770,6 +1849,16 @@ app.post('/api/reservations', (req, res) => {
   if (hasConflict) {
     return res.status(409).json({ ok: false, error: 'Conflito de datas: ja existe reserva para este intervalo.' });
   }
+  if (nextStatus !== 'cancelled') {
+    const availabilityValidation = validateStayAgainstAvailability(db, accommodationId, checkIn, checkOut);
+    if (!availabilityValidation.ok) {
+      return res.status(availabilityValidation.status).json({
+        ok: false,
+        error: availabilityValidation.error,
+        details: availabilityValidation.details
+      });
+    }
+  }
 
   const reservation = {
     id: nextId('res'),
@@ -1853,6 +1942,21 @@ app.put('/api/reservations/:id', (req, res) => {
   });
   if (hasConflict) {
     return res.status(409).json({ ok: false, error: 'Conflito de datas: ja existe reserva para este intervalo.' });
+  }
+  if (nextStatus !== 'cancelled') {
+    const availabilityValidation = validateStayAgainstAvailability(
+      db,
+      current.accommodationId,
+      nextCheckIn,
+      nextCheckOut
+    );
+    if (!availabilityValidation.ok) {
+      return res.status(availabilityValidation.status).json({
+        ok: false,
+        error: availabilityValidation.error,
+        details: availabilityValidation.details
+      });
+    }
   }
 
   const updatedReservation = {

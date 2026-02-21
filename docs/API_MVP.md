@@ -209,6 +209,7 @@ ou
   - validações:
     - `checkOut` tem de ser posterior a `checkIn`
     - evita sobreposição de datas no mesmo alojamento (reservas `cancelled` não bloqueiam)
+    - aplica as mesmas regras de disponibilidade do `POST /api/rate-quote` (incluindo `availability-overrides`)
 - `PATCH /api/reservations/:id/status`
   - body:
 ```json
@@ -220,7 +221,7 @@ ou
 - `GET /api/reservations/:id`
 - `PUT /api/reservations/:id`
   - permite atualizar: `guestName`, `checkIn`, `checkOut`, `adults`, `children`, `source`, `status`
-  - mantém validações de datas e sobreposição
+  - mantém validações de datas, sobreposição e disponibilidade (rules + overrides)
 - `DELETE /api/reservations/:id`
   - remove reserva do registo local
 
