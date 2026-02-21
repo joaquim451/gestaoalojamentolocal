@@ -1297,6 +1297,167 @@ app.post('/api/availability-rules', (req, res) => {
   return res.status(201).json({ ok: true, data: rule });
 });
 
+app.put('/api/availability-rules/:id', (req, res) => {
+  const body = req.body || {};
+  const mutableFields = [
+    'startDate',
+    'endDate',
+    'closed',
+    'closedToArrival',
+    'closedToDeparture',
+    'minNights',
+    'maxNights',
+    'minAdvanceHours',
+    'maxAdvanceDays',
+    'allowedArrivalWeekdays',
+    'allowedDepartureWeekdays',
+    'note'
+  ];
+  const hasAnyMutableField = mutableFields.some((field) => hasOwn(body, field));
+  if (!hasAnyMutableField) {
+    return res.status(400).json({ ok: false, error: 'Defina pelo menos um campo para atualizar a regra.' });
+  }
+
+  const db = readDb();
+  normalizeDomainCollections(db);
+  const index = db.availabilityRules.findIndex((item) => item.id === req.params.id);
+  if (index < 0) {
+    return res.status(404).json({ ok: false, error: 'Regra de disponibilidade nao encontrada.' });
+  }
+
+  const current = db.availabilityRules[index];
+  const updated = { ...current };
+  const nextStartDate = hasOwn(body, 'startDate') ? body.startDate : current.startDate;
+  const nextEndDate = hasOwn(body, 'endDate') ? body.endDate : current.endDate;
+
+  if (!isValidIsoDate(nextStartDate) || !isValidIsoDate(nextEndDate) || new Date(nextStartDate) > new Date(nextEndDate)) {
+    return res.status(400).json({ ok: false, error: 'Intervalo de datas invalido.' });
+  }
+  updated.startDate = formatIsoDateOnly(nextStartDate);
+  updated.endDate = formatIsoDateOnly(nextEndDate);
+
+  if (hasOwn(body, 'closed')) {
+    if (typeof body.closed !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'closed deve ser boolean.' });
+    }
+    updated.closed = body.closed;
+  }
+  if (hasOwn(body, 'closedToArrival')) {
+    if (typeof body.closedToArrival !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'closedToArrival deve ser boolean.' });
+    }
+    updated.closedToArrival = body.closedToArrival;
+  }
+  if (hasOwn(body, 'closedToDeparture')) {
+    if (typeof body.closedToDeparture !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'closedToDeparture deve ser boolean.' });
+    }
+    updated.closedToDeparture = body.closedToDeparture;
+  }
+
+  if (hasOwn(body, 'minNights')) {
+    const normalizedMinNights = Number(body.minNights);
+    if (!Number.isFinite(normalizedMinNights) || normalizedMinNights < 0) {
+      return res.status(400).json({ ok: false, error: 'minNights deve ser numero >= 0.' });
+    }
+    updated.minNights = normalizedMinNights;
+  }
+  if (hasOwn(body, 'maxNights')) {
+    const normalizedMaxNights = Number(body.maxNights);
+    if (!Number.isFinite(normalizedMaxNights) || normalizedMaxNights < 0) {
+      return res.status(400).json({ ok: false, error: 'maxNights deve ser numero >= 0.' });
+    }
+    updated.maxNights = normalizedMaxNights;
+  }
+  if (hasOwn(body, 'minAdvanceHours')) {
+    const normalizedMinAdvanceHours = Number(body.minAdvanceHours);
+    if (!Number.isFinite(normalizedMinAdvanceHours) || normalizedMinAdvanceHours < 0) {
+      return res.status(400).json({ ok: false, error: 'minAdvanceHours deve ser numero >= 0.' });
+    }
+    updated.minAdvanceHours = normalizedMinAdvanceHours;
+  }
+  if (hasOwn(body, 'maxAdvanceDays')) {
+    const normalizedMaxAdvanceDays = Number(body.maxAdvanceDays);
+    if (!Number.isFinite(normalizedMaxAdvanceDays) || normalizedMaxAdvanceDays < 0) {
+      return res.status(400).json({ ok: false, error: 'maxAdvanceDays deve ser numero >= 0.' });
+    }
+    updated.maxAdvanceDays = normalizedMaxAdvanceDays;
+  }
+  if (hasOwn(body, 'allowedArrivalWeekdays')) {
+    if (!Array.isArray(body.allowedArrivalWeekdays)) {
+      return res.status(400).json({ ok: false, error: 'allowedArrivalWeekdays deve ser array de inteiros 0-6.' });
+    }
+    const normalizedArrivalWeekdays = normalizeWeekdaysInput(body.allowedArrivalWeekdays);
+    if (normalizedArrivalWeekdays.length !== body.allowedArrivalWeekdays.length) {
+      return res.status(400).json({ ok: false, error: 'allowedArrivalWeekdays deve conter apenas inteiros de 0 a 6.' });
+    }
+    updated.allowedArrivalWeekdays = normalizedArrivalWeekdays;
+  }
+  if (hasOwn(body, 'allowedDepartureWeekdays')) {
+    if (!Array.isArray(body.allowedDepartureWeekdays)) {
+      return res.status(400).json({ ok: false, error: 'allowedDepartureWeekdays deve ser array de inteiros 0-6.' });
+    }
+    const normalizedDepartureWeekdays = normalizeWeekdaysInput(body.allowedDepartureWeekdays);
+    if (normalizedDepartureWeekdays.length !== body.allowedDepartureWeekdays.length) {
+      return res.status(400).json({ ok: false, error: 'allowedDepartureWeekdays deve conter apenas inteiros de 0 a 6.' });
+    }
+    updated.allowedDepartureWeekdays = normalizedDepartureWeekdays;
+  }
+  if (hasOwn(body, 'note')) {
+    const normalizedNote = String(body.note || '').trim();
+    updated.note = normalizedNote || null;
+  }
+
+  if (Number(updated.maxNights) > 0 && Number(updated.maxNights) < Number(updated.minNights)) {
+    return res.status(400).json({ ok: false, error: 'maxNights nao pode ser inferior a minNights.' });
+  }
+
+  updated.updatedAt = new Date().toISOString();
+  db.availabilityRules[index] = updated;
+  appendAuditLog(db, {
+    action: 'availability_rules.update',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'availability_rule', id: updated.id },
+    metadata: {
+      accommodationId: updated.accommodationId,
+      startDate: updated.startDate,
+      endDate: updated.endDate,
+      closed: updated.closed,
+      closedToArrival: updated.closedToArrival,
+      closedToDeparture: updated.closedToDeparture,
+      minNights: updated.minNights,
+      maxNights: updated.maxNights,
+      minAdvanceHours: updated.minAdvanceHours,
+      maxAdvanceDays: updated.maxAdvanceDays,
+      allowedArrivalWeekdays: updated.allowedArrivalWeekdays,
+      allowedDepartureWeekdays: updated.allowedDepartureWeekdays
+    }
+  });
+  writeDb(db);
+
+  return res.json({ ok: true, data: updated });
+});
+
+app.delete('/api/availability-rules/:id', (req, res) => {
+  const db = readDb();
+  normalizeDomainCollections(db);
+  const index = db.availabilityRules.findIndex((item) => item.id === req.params.id);
+  if (index < 0) {
+    return res.status(404).json({ ok: false, error: 'Regra de disponibilidade nao encontrada.' });
+  }
+
+  const [removed] = db.availabilityRules.splice(index, 1);
+  appendAuditLog(db, {
+    action: 'availability_rules.delete',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'availability_rule', id: removed.id },
+    metadata: { accommodationId: removed.accommodationId, startDate: removed.startDate, endDate: removed.endDate }
+  });
+  writeDb(db);
+
+  return res.json({ ok: true, data: removed });
+});
+
 app.get('/api/availability-overrides', (req, res) => {
   const { accommodationId, dateFrom, dateTo, page, pageSize, sortBy, sortDir } = req.query || {};
   if ((dateFrom && !isValidIsoDate(dateFrom)) || (dateTo && !isValidIsoDate(dateTo))) {

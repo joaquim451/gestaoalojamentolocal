@@ -140,6 +140,9 @@ ou
   "note": "Natal fechado"
 }
 ```
+- `PUT /api/availability-rules/:id`
+  - atualização parcial dos campos da regra (`startDate`, `endDate`, flags, limites, weekdays, `note`)
+- `DELETE /api/availability-rules/:id`
 - Efeito no `POST /api/rate-quote`:
   - bloqueia cotação em datas `closed=true` (`HTTP 409`)
   - bloqueia check-in em datas `closedToArrival=true`

@@ -1073,6 +1073,110 @@ test('POST /api/rate-quote enforces advance notice windows', async () => {
   assert.equal(valid.status, 200);
 });
 
+test('PUT /api/availability-rules/:id updates rule fields', async () => {
+  const token = await loginAsAdmin(server);
+  const createdRule = await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-10',
+      endDate: '2026-12-20',
+      closed: true,
+      minNights: 1
+    },
+    token
+  );
+
+  const updatedRule = await request(
+    server,
+    'PUT',
+    `/api/availability-rules/${createdRule.json.data.id}`,
+    {
+      closed: false,
+      minNights: 3,
+      allowedArrivalWeekdays: [1, 2]
+    },
+    token
+  );
+
+  assert.equal(createdRule.status, 201);
+  assert.equal(updatedRule.status, 200);
+  assert.equal(updatedRule.json.ok, true);
+  assert.equal(updatedRule.json.data.closed, false);
+  assert.equal(updatedRule.json.data.minNights, 3);
+  assert.deepEqual(updatedRule.json.data.allowedArrivalWeekdays, [1, 2]);
+});
+
+test('DELETE /api/availability-rules/:id removes blackout and unblocks quote', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Delete Rule',
+      currency: 'EUR',
+      baseNightlyRate: 95
+    },
+    token
+  );
+
+  const createdRule = await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-24',
+      endDate: '2026-12-24',
+      closed: true
+    },
+    token
+  );
+
+  const blockedQuote = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-24',
+      checkOut: '2026-12-25'
+    },
+    token
+  );
+
+  const deletedRule = await request(
+    server,
+    'DELETE',
+    `/api/availability-rules/${createdRule.json.data.id}`,
+    null,
+    token
+  );
+
+  const allowedQuote = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-24',
+      checkOut: '2026-12-25'
+    },
+    token
+  );
+
+  assert.equal(blockedQuote.status, 409);
+  assert.equal(deletedRule.status, 200);
+  assert.equal(allowedQuote.status, 200);
+  assert.equal(allowedQuote.json.ok, true);
+});
+
 test('GET /api/availability-calendar returns booked and closed days', async () => {
   const token = await loginAsAdmin(server);
   const plan = await request(
