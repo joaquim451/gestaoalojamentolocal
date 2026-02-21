@@ -125,6 +125,61 @@ function pickAvailabilityConstraints(availabilityRules, accommodationId, dateStr
   };
 }
 
+function getAvailabilityOverride(availabilityOverrides, accommodationId, dateStr) {
+  return (availabilityOverrides || []).find((item) => {
+    return item.accommodationId === accommodationId && item.date === dateStr;
+  }) || null;
+}
+
+function applyAvailabilityOverride(baseConstraints, override) {
+  const merged = {
+    ...baseConstraints,
+    matchingRuleIds: [...(baseConstraints.matchingRuleIds || [])],
+    appliedOverrideId: null,
+    appliedOverrideNote: null
+  };
+
+  if (!override) {
+    return merged;
+  }
+
+  if (hasOwn(override, 'closed') && typeof override.closed === 'boolean') {
+    merged.closed = override.closed;
+  }
+  if (hasOwn(override, 'closedToArrival') && typeof override.closedToArrival === 'boolean') {
+    merged.closedToArrival = override.closedToArrival;
+  }
+  if (hasOwn(override, 'closedToDeparture') && typeof override.closedToDeparture === 'boolean') {
+    merged.closedToDeparture = override.closedToDeparture;
+  }
+  if (hasOwn(override, 'minNights') && Number.isFinite(Number(override.minNights))) {
+    merged.minNights = Math.max(Number(override.minNights), 0);
+  }
+  if (hasOwn(override, 'maxNights') && Number.isFinite(Number(override.maxNights))) {
+    merged.maxNights = Math.max(Number(override.maxNights), 0);
+  }
+  if (hasOwn(override, 'minAdvanceHours') && Number.isFinite(Number(override.minAdvanceHours))) {
+    merged.minAdvanceHours = Math.max(Number(override.minAdvanceHours), 0);
+  }
+  if (hasOwn(override, 'maxAdvanceDays') && Number.isFinite(Number(override.maxAdvanceDays))) {
+    merged.maxAdvanceDays = Math.max(Number(override.maxAdvanceDays), 0);
+  }
+  if (hasOwn(override, 'allowedArrivalWeekdays') && Array.isArray(override.allowedArrivalWeekdays)) {
+    merged.allowedArrivalWeekdays = normalizeWeekdaysInput(override.allowedArrivalWeekdays);
+  }
+  if (hasOwn(override, 'allowedDepartureWeekdays') && Array.isArray(override.allowedDepartureWeekdays)) {
+    merged.allowedDepartureWeekdays = normalizeWeekdaysInput(override.allowedDepartureWeekdays);
+  }
+
+  merged.appliedOverrideId = override.id;
+  merged.appliedOverrideNote = override.note || null;
+  return merged;
+}
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
 function normalizeUsersCollection(db) {
   if (!Array.isArray(db.users)) {
     db.users = [];
@@ -155,6 +210,9 @@ function normalizeDomainCollections(db) {
   }
   if (!Array.isArray(db.availabilityRules)) {
     db.availabilityRules = [];
+  }
+  if (!Array.isArray(db.availabilityOverrides)) {
+    db.availabilityOverrides = [];
   }
 }
 
@@ -1042,6 +1100,241 @@ app.post('/api/availability-rules', (req, res) => {
   return res.status(201).json({ ok: true, data: rule });
 });
 
+app.get('/api/availability-overrides', (req, res) => {
+  const { accommodationId, dateFrom, dateTo, page, pageSize, sortBy, sortDir } = req.query || {};
+  if ((dateFrom && !isValidIsoDate(dateFrom)) || (dateTo && !isValidIsoDate(dateTo))) {
+    return res.status(400).json({ ok: false, error: 'dateFrom/dateTo invalidos. Use formato ISO (YYYY-MM-DD).' });
+  }
+  if (dateFrom && dateTo && new Date(dateFrom) > new Date(dateTo)) {
+    return res.status(400).json({ ok: false, error: 'Intervalo dateFrom/dateTo invalido.' });
+  }
+
+  const db = readDb();
+  normalizeDomainCollections(db);
+  let data = db.availabilityOverrides;
+
+  if (accommodationId) {
+    data = data.filter((item) => item.accommodationId === accommodationId);
+  }
+  if (dateFrom || dateTo) {
+    const normalizedDateFrom = dateFrom ? formatIsoDateOnly(dateFrom) : '1970-01-01';
+    const normalizedDateTo = dateTo ? formatIsoDateOnly(dateTo) : '9999-12-31';
+    data = data.filter((item) => item.date >= normalizedDateFrom && item.date <= normalizedDateTo);
+  }
+
+  const allowedSortFields = new Set(['date', 'createdAt', 'updatedAt']);
+  const selectedSortBy = allowedSortFields.has(sortBy) ? sortBy : 'date';
+  const selectedSortDir = parseSortDir(sortDir, 'asc');
+  const selectedPage = parsePositiveInt(page, 1, 1, 100000);
+  const selectedPageSize = parsePositiveInt(pageSize, 50, 1, 200);
+
+  const sorted = sortItems(data, selectedSortBy, selectedSortDir);
+  const paginated = paginateItems(sorted, selectedPage, selectedPageSize);
+  return res.json({
+    ok: true,
+    data: paginated.data,
+    meta: { ...paginated.meta, sortBy: selectedSortBy, sortDir: selectedSortDir }
+  });
+});
+
+app.post('/api/availability-overrides', (req, res) => {
+  const {
+    accommodationId,
+    date,
+    closed,
+    closedToArrival,
+    closedToDeparture,
+    minNights,
+    maxNights,
+    minAdvanceHours,
+    maxAdvanceDays,
+    allowedArrivalWeekdays,
+    allowedDepartureWeekdays,
+    note
+  } = req.body || {};
+
+  if (!accommodationId || !date) {
+    return res.status(400).json({ ok: false, error: 'Campos obrigatorios: accommodationId, date' });
+  }
+  if (!isValidIsoDate(date)) {
+    return res.status(400).json({ ok: false, error: 'date invalida. Use formato ISO (YYYY-MM-DD).' });
+  }
+
+  const body = req.body || {};
+  const mutableFields = [
+    'closed',
+    'closedToArrival',
+    'closedToDeparture',
+    'minNights',
+    'maxNights',
+    'minAdvanceHours',
+    'maxAdvanceDays',
+    'allowedArrivalWeekdays',
+    'allowedDepartureWeekdays',
+    'note'
+  ];
+  const hasAnyMutableField = mutableFields.some((field) => hasOwn(body, field));
+  if (!hasAnyMutableField) {
+    return res.status(400).json({ ok: false, error: 'Defina pelo menos um campo de override.' });
+  }
+
+  const db = readDb();
+  normalizeDomainCollections(db);
+  const accommodation = db.accommodations.find((item) => item.id === accommodationId);
+  if (!accommodation) {
+    return res.status(404).json({ ok: false, error: 'Alojamento nao encontrado' });
+  }
+
+  const normalizedDate = formatIsoDateOnly(date);
+  const currentIndex = db.availabilityOverrides.findIndex((item) => {
+    return item.accommodationId === accommodationId && item.date === normalizedDate;
+  });
+  const current = currentIndex >= 0 ? db.availabilityOverrides[currentIndex] : null;
+  const now = new Date().toISOString();
+  const override = current
+    ? { ...current }
+    : {
+      id: nextId('ao'),
+      accommodationId,
+      date: normalizedDate,
+      createdAt: now
+    };
+
+  if (hasOwn(body, 'closed')) {
+    if (typeof closed !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'closed deve ser boolean.' });
+    }
+    override.closed = closed;
+  }
+  if (hasOwn(body, 'closedToArrival')) {
+    if (typeof closedToArrival !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'closedToArrival deve ser boolean.' });
+    }
+    override.closedToArrival = closedToArrival;
+  }
+  if (hasOwn(body, 'closedToDeparture')) {
+    if (typeof closedToDeparture !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'closedToDeparture deve ser boolean.' });
+    }
+    override.closedToDeparture = closedToDeparture;
+  }
+
+  if (hasOwn(body, 'minNights')) {
+    const normalizedMinNights = Number(minNights);
+    if (!Number.isFinite(normalizedMinNights) || normalizedMinNights < 0) {
+      return res.status(400).json({ ok: false, error: 'minNights deve ser numero >= 0.' });
+    }
+    override.minNights = normalizedMinNights;
+  }
+  if (hasOwn(body, 'maxNights')) {
+    const normalizedMaxNights = Number(maxNights);
+    if (!Number.isFinite(normalizedMaxNights) || normalizedMaxNights < 0) {
+      return res.status(400).json({ ok: false, error: 'maxNights deve ser numero >= 0.' });
+    }
+    override.maxNights = normalizedMaxNights;
+  }
+  if (hasOwn(body, 'minAdvanceHours')) {
+    const normalizedMinAdvanceHours = Number(minAdvanceHours);
+    if (!Number.isFinite(normalizedMinAdvanceHours) || normalizedMinAdvanceHours < 0) {
+      return res.status(400).json({ ok: false, error: 'minAdvanceHours deve ser numero >= 0.' });
+    }
+    override.minAdvanceHours = normalizedMinAdvanceHours;
+  }
+  if (hasOwn(body, 'maxAdvanceDays')) {
+    const normalizedMaxAdvanceDays = Number(maxAdvanceDays);
+    if (!Number.isFinite(normalizedMaxAdvanceDays) || normalizedMaxAdvanceDays < 0) {
+      return res.status(400).json({ ok: false, error: 'maxAdvanceDays deve ser numero >= 0.' });
+    }
+    override.maxAdvanceDays = normalizedMaxAdvanceDays;
+  }
+  if (hasOwn(body, 'allowedArrivalWeekdays')) {
+    if (!Array.isArray(allowedArrivalWeekdays)) {
+      return res.status(400).json({ ok: false, error: 'allowedArrivalWeekdays deve ser array de inteiros 0-6.' });
+    }
+    const normalizedArrivalWeekdays = normalizeWeekdaysInput(allowedArrivalWeekdays);
+    if (normalizedArrivalWeekdays.length !== allowedArrivalWeekdays.length) {
+      return res.status(400).json({ ok: false, error: 'allowedArrivalWeekdays deve conter apenas inteiros de 0 a 6.' });
+    }
+    override.allowedArrivalWeekdays = normalizedArrivalWeekdays;
+  }
+  if (hasOwn(body, 'allowedDepartureWeekdays')) {
+    if (!Array.isArray(allowedDepartureWeekdays)) {
+      return res.status(400).json({ ok: false, error: 'allowedDepartureWeekdays deve ser array de inteiros 0-6.' });
+    }
+    const normalizedDepartureWeekdays = normalizeWeekdaysInput(allowedDepartureWeekdays);
+    if (normalizedDepartureWeekdays.length !== allowedDepartureWeekdays.length) {
+      return res.status(400).json({ ok: false, error: 'allowedDepartureWeekdays deve conter apenas inteiros de 0 a 6.' });
+    }
+    override.allowedDepartureWeekdays = normalizedDepartureWeekdays;
+  }
+  if (hasOwn(body, 'note')) {
+    const normalizedNote = String(note || '').trim();
+    override.note = normalizedNote || null;
+  }
+
+  if (
+    Number.isFinite(Number(override.maxNights))
+    && Number(override.maxNights) > 0
+    && Number.isFinite(Number(override.minNights))
+    && Number(override.maxNights) < Number(override.minNights)
+  ) {
+    return res.status(400).json({ ok: false, error: 'maxNights nao pode ser inferior a minNights.' });
+  }
+
+  override.updatedAt = now;
+  const isUpdate = currentIndex >= 0;
+  if (isUpdate) {
+    db.availabilityOverrides[currentIndex] = override;
+  } else {
+    db.availabilityOverrides.push(override);
+  }
+
+  appendAuditLog(db, {
+    action: isUpdate ? 'availability_overrides.update' : 'availability_overrides.create',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'availability_override', id: override.id },
+    metadata: {
+      accommodationId: override.accommodationId,
+      date: override.date,
+      closed: override.closed,
+      closedToArrival: override.closedToArrival,
+      closedToDeparture: override.closedToDeparture,
+      minNights: override.minNights,
+      maxNights: override.maxNights,
+      minAdvanceHours: override.minAdvanceHours,
+      maxAdvanceDays: override.maxAdvanceDays,
+      allowedArrivalWeekdays: override.allowedArrivalWeekdays,
+      allowedDepartureWeekdays: override.allowedDepartureWeekdays,
+      note: override.note
+    }
+  });
+  writeDb(db);
+
+  return res.status(isUpdate ? 200 : 201).json({ ok: true, data: override });
+});
+
+app.delete('/api/availability-overrides/:id', (req, res) => {
+  const { id } = req.params;
+  const db = readDb();
+  normalizeDomainCollections(db);
+
+  const index = db.availabilityOverrides.findIndex((item) => item.id === id);
+  if (index < 0) {
+    return res.status(404).json({ ok: false, error: 'Override de disponibilidade nao encontrado.' });
+  }
+
+  const [removed] = db.availabilityOverrides.splice(index, 1);
+  appendAuditLog(db, {
+    action: 'availability_overrides.delete',
+    actor: { userId: req.auth.userId, email: req.auth.email, role: req.auth.role },
+    target: { type: 'availability_override', id: removed.id },
+    metadata: { accommodationId: removed.accommodationId, date: removed.date }
+  });
+  writeDb(db);
+
+  return res.json({ ok: true, data: removed });
+});
+
 app.post('/api/rate-quote', (req, res) => {
   const { accommodationId, ratePlanId, checkIn, checkOut, adults, children } = req.body || {};
   if (!accommodationId || !checkIn || !checkOut) {
@@ -1072,8 +1365,18 @@ app.post('/api/rate-quote', (req, res) => {
 
   const nights = countNights(checkIn, checkOut);
   const minNightsFromPlan = Number(plan.minNights || 1);
-  const arrivalConstraints = pickAvailabilityConstraints(db.availabilityRules, accommodationId, formatIsoDateOnly(checkIn));
-  const departureConstraints = pickAvailabilityConstraints(db.availabilityRules, accommodationId, formatIsoDateOnly(checkOut));
+  const checkInDateStr = formatIsoDateOnly(checkIn);
+  const checkOutDateStr = formatIsoDateOnly(checkOut);
+  const arrivalOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, checkInDateStr);
+  const departureOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, checkOutDateStr);
+  const arrivalConstraints = applyAvailabilityOverride(
+    pickAvailabilityConstraints(db.availabilityRules, accommodationId, checkInDateStr),
+    arrivalOverride
+  );
+  const departureConstraints = applyAvailabilityOverride(
+    pickAvailabilityConstraints(db.availabilityRules, accommodationId, checkOutDateStr),
+    departureOverride
+  );
   const checkInDay = new Date(checkIn).getUTCDay();
   const checkOutDay = new Date(checkOut).getUTCDay();
   const now = getNow();
@@ -1095,15 +1398,23 @@ app.post('/api/rate-quote', (req, res) => {
   if (arrivalConstraints.closedToArrival) {
     return res.status(409).json({
       ok: false,
-      error: `Check-in indisponivel em ${formatIsoDateOnly(checkIn)} (closedToArrival).`,
-      details: { date: formatIsoDateOnly(checkIn), matchingRuleIds: arrivalConstraints.matchingRuleIds }
+      error: `Check-in indisponivel em ${checkInDateStr} (closedToArrival).`,
+      details: {
+        date: checkInDateStr,
+        matchingRuleIds: arrivalConstraints.matchingRuleIds,
+        appliedOverrideId: arrivalConstraints.appliedOverrideId
+      }
     });
   }
   if (departureConstraints.closedToDeparture) {
     return res.status(409).json({
       ok: false,
-      error: `Check-out indisponivel em ${formatIsoDateOnly(checkOut)} (closedToDeparture).`,
-      details: { date: formatIsoDateOnly(checkOut), matchingRuleIds: departureConstraints.matchingRuleIds }
+      error: `Check-out indisponivel em ${checkOutDateStr} (closedToDeparture).`,
+      details: {
+        date: checkOutDateStr,
+        matchingRuleIds: departureConstraints.matchingRuleIds,
+        appliedOverrideId: departureConstraints.appliedOverrideId
+      }
     });
   }
   if (
@@ -1148,16 +1459,25 @@ app.post('/api/rate-quote', (req, res) => {
   let minNightsFromRules = 0;
   let maxNightsFromRules = 0;
   const triggeredRuleIds = new Set();
+  const triggeredOverrideIds = new Set();
 
   for (let i = 0; i < nights; i += 1) {
     const date = addDays(checkIn, i);
     const dateStr = formatIsoDateOnly(date);
-    const availability = pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr);
+    const dateOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, dateStr);
+    const availability = applyAvailabilityOverride(
+      pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr),
+      dateOverride
+    );
     if (availability.closed) {
       return res.status(409).json({
         ok: false,
         error: `Data indisponivel para reserva: ${dateStr}.`,
-        details: { date: dateStr, matchingRuleIds: availability.matchingRuleIds }
+        details: {
+          date: dateStr,
+          matchingRuleIds: availability.matchingRuleIds,
+          appliedOverrideId: availability.appliedOverrideId
+        }
       });
     }
     minNightsFromRules = Math.max(minNightsFromRules, availability.minNights);
@@ -1165,6 +1485,9 @@ app.post('/api/rate-quote', (req, res) => {
       ? availability.maxNights
       : (availability.maxNights > 0 ? Math.min(maxNightsFromRules, availability.maxNights) : maxNightsFromRules);
     availability.matchingRuleIds.forEach((id) => triggeredRuleIds.add(id));
+    if (availability.appliedOverrideId) {
+      triggeredOverrideIds.add(availability.appliedOverrideId);
+    }
 
     const dayOfWeek = date.getUTCDay();
     const isWeekend = dayOfWeek === 5 || dayOfWeek === 6;
@@ -1181,6 +1504,8 @@ app.post('/api/rate-quote', (req, res) => {
       seasonalMultiplier: seasonalMult,
       maxNightsConstraint: availability.maxNights,
       minNightsConstraint: availability.minNights,
+      appliedOverrideId: availability.appliedOverrideId,
+      appliedOverrideNote: availability.appliedOverrideNote,
       nightlyRate: Number(nightlyRate.toFixed(2))
     });
   }
@@ -1230,7 +1555,10 @@ app.post('/api/rate-quote', (req, res) => {
         closedToDeparture: departureConstraints.closedToDeparture,
         allowedArrivalWeekdays: arrivalConstraints.allowedArrivalWeekdays,
         allowedDepartureWeekdays: departureConstraints.allowedDepartureWeekdays,
-        triggeredAvailabilityRuleIds: [...triggeredRuleIds]
+        arrivalOverrideId: arrivalConstraints.appliedOverrideId,
+        departureOverrideId: departureConstraints.appliedOverrideId,
+        triggeredAvailabilityRuleIds: [...triggeredRuleIds],
+        triggeredAvailabilityOverrideIds: [...triggeredOverrideIds]
       },
       perNightDetails,
       pricing: {
@@ -1286,7 +1614,11 @@ app.get('/api/availability-calendar', (req, res) => {
       return hasDateRangeOverlap(item.checkIn, item.checkOut, dateStr, nextDay);
     });
 
-    const availability = pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr);
+    const dateOverride = getAvailabilityOverride(db.availabilityOverrides, accommodationId, dateStr);
+    const availability = applyAvailabilityOverride(
+      pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr),
+      dateOverride
+    );
     const isArrivalWeekdayAllowed = availability.allowedArrivalWeekdays.length === 0
       || availability.allowedArrivalWeekdays.includes(dayOfWeek);
     const isWithinMinAdvance = hoursUntilDate >= Number(availability.minAdvanceHours || 0);
@@ -1301,7 +1633,7 @@ app.get('/api/availability-calendar', (req, res) => {
       reason = 'occupied_by_reservation';
     } else if (availability.closed) {
       status = 'closed';
-      reason = 'blackout_rule';
+      reason = availability.appliedOverrideId ? 'blackout_override' : 'blackout_rule';
     }
 
     let pricing = null;
@@ -1340,6 +1672,8 @@ app.get('/api/availability-calendar', (req, res) => {
       maxNightsConstraint: availability.maxNights,
       minNightsConstraint: availability.minNights,
       triggeredAvailabilityRuleIds: availability.matchingRuleIds,
+      appliedOverrideId: availability.appliedOverrideId,
+      appliedOverrideNote: availability.appliedOverrideNote,
       reservationIds: bookedReservations.map((item) => item.id),
       pricing
     });

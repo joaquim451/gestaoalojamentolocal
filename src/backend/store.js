@@ -16,6 +16,7 @@ function ensureDb() {
       reservations: [],
       ratePlans: [],
       availabilityRules: [],
+      availabilityOverrides: [],
       auditLogs: [],
       authSessions: []
     };

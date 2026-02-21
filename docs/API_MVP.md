@@ -148,6 +148,35 @@ ou
   - aplica estadia máxima por período (`maxNights`)
   - aplica antecedência mínima (`minAdvanceHours`) e máxima (`maxAdvanceDays`)
   - restringe dias da semana permitidos para check-in/check-out
+  - pode ser sobreposto por `availability-overrides` ao nível de data
+
+## Overrides de Disponibilidade (por data)
+- `GET /api/availability-overrides`
+  - filtros opcionais: `accommodationId`, `dateFrom`, `dateTo`
+  - paginação/ordenação opcionais: `page`, `pageSize`, `sortBy`, `sortDir`
+- `POST /api/availability-overrides`
+  - upsert por chave lógica: (`accommodationId`, `date`)
+  - cria (`HTTP 201`) se não existir; atualiza (`HTTP 200`) se já existir
+```json
+{
+  "accommodationId": "acc_123",
+  "date": "2026-12-24",
+  "closed": false,
+  "closedToArrival": false,
+  "closedToDeparture": false,
+  "minNights": 0,
+  "maxNights": 0,
+  "minAdvanceHours": 0,
+  "maxAdvanceDays": 0,
+  "allowedArrivalWeekdays": [0, 1, 2, 3, 4, 5, 6],
+  "allowedDepartureWeekdays": [0, 1, 2, 3, 4, 5, 6],
+  "note": "Exceção operacional"
+}
+```
+- `DELETE /api/availability-overrides/:id`
+- Precedência:
+  - primeiro são avaliadas `availability-rules`
+  - depois o override da data substitui os campos definidos nessa data
 
 ## Calendário de Disponibilidade (Diário)
 - `GET /api/availability-calendar`
@@ -157,6 +186,7 @@ ou
     - estado (`available`, `booked`, `closed`)
     - IDs de reservas a ocupar a data
     - regras de disponibilidade acionadas
+    - override aplicado (`appliedOverrideId`, `appliedOverrideNote`) quando existir
     - flags de restrição (`closedToArrival`, `closedToDeparture`, `minNightsConstraint`, `maxNightsConstraint`, `minAdvanceHours`, `maxAdvanceDays`)
     - dias permitidos (`allowedArrivalWeekdays`, `allowedDepartureWeekdays`) e `canBookArrivalNow`
     - preço sugerido por noite (quando existir rate plan)

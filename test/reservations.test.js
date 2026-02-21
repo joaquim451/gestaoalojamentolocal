@@ -47,6 +47,7 @@ function resetDb() {
     reservations: [],
     ratePlans: [],
     availabilityRules: [],
+    availabilityOverrides: [],
     auditLogs: [],
     authSessions: []
   };
@@ -656,6 +657,81 @@ test('POST /api/rate-quote blocks blackout dates from availability rules', async
   assert.equal(quote.json.ok, false);
 });
 
+test('POST /api/rate-quote allows reopening closed date with availability override', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Override Reopen',
+      currency: 'EUR',
+      baseNightlyRate: 92
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-24',
+      endDate: '2026-12-24',
+      closed: true
+    },
+    token
+  );
+
+  const blocked = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-24',
+      checkOut: '2026-12-25'
+    },
+    token
+  );
+
+  const override = await request(
+    server,
+    'POST',
+    '/api/availability-overrides',
+    {
+      accommodationId: 'acc_test_1',
+      date: '2026-12-24',
+      closed: false,
+      note: 'Reabertura pontual'
+    },
+    token
+  );
+
+  const reopened = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-12-24',
+      checkOut: '2026-12-25'
+    },
+    token
+  );
+
+  assert.equal(blocked.status, 409);
+  assert.equal(override.status, 201);
+  assert.equal(reopened.status, 200);
+  assert.equal(reopened.json.ok, true);
+  assert.equal(reopened.json.data.constraints.arrivalOverrideId, override.json.data.id);
+  assert.equal(reopened.json.data.perNightDetails[0].appliedOverrideId, override.json.data.id);
+});
+
 test('POST /api/rate-quote enforces min nights from availability rules', async () => {
   const token = await loginAsAdmin(server);
   const plan = await request(
@@ -1088,6 +1164,103 @@ test('GET /api/availability-calendar includes suggested daily price', async () =
   assert.equal(typeof calendar.json.data.days[0].closedToArrival, 'boolean');
   assert.equal(typeof calendar.json.data.days[0].closedToDeparture, 'boolean');
   assert.equal(calendar.json.data.days[0].pricing.suggestedNightlyTotal, 147);
+});
+
+test('GET /api/availability-calendar applies override metadata and updated status', async () => {
+  const token = await loginAsAdmin(server);
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-12-21',
+      endDate: '2026-12-21',
+      closed: true
+    },
+    token
+  );
+
+  const override = await request(
+    server,
+    'POST',
+    '/api/availability-overrides',
+    {
+      accommodationId: 'acc_test_1',
+      date: '2026-12-21',
+      closed: false,
+      note: 'Aberto para evento'
+    },
+    token
+  );
+
+  const calendar = await request(
+    server,
+    'GET',
+    '/api/availability-calendar?accommodationId=acc_test_1&dateFrom=2026-12-21&dateTo=2026-12-21',
+    null,
+    token
+  );
+
+  assert.equal(override.status, 201);
+  assert.equal(calendar.status, 200);
+  assert.equal(calendar.json.ok, true);
+  assert.equal(calendar.json.data.days[0].status, 'available');
+  assert.equal(calendar.json.data.days[0].appliedOverrideId, override.json.data.id);
+  assert.equal(calendar.json.data.days[0].appliedOverrideNote, 'Aberto para evento');
+});
+
+test('availability overrides supports upsert update, list and delete', async () => {
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/availability-overrides',
+    {
+      accommodationId: 'acc_test_1',
+      date: '2026-12-28',
+      closed: true,
+      note: 'Fechado inicialmente'
+    },
+    token
+  );
+
+  const updated = await request(
+    server,
+    'POST',
+    '/api/availability-overrides',
+    {
+      accommodationId: 'acc_test_1',
+      date: '2026-12-28',
+      closed: false,
+      note: 'Reaberto'
+    },
+    token
+  );
+
+  const listed = await request(
+    server,
+    'GET',
+    '/api/availability-overrides?accommodationId=acc_test_1&dateFrom=2026-12-28&dateTo=2026-12-28',
+    null,
+    token
+  );
+
+  const deleted = await request(
+    server,
+    'DELETE',
+    `/api/availability-overrides/${created.json.data.id}`,
+    null,
+    token
+  );
+
+  assert.equal(created.status, 201);
+  assert.equal(updated.status, 200);
+  assert.equal(updated.json.data.id, created.json.data.id);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.json.data.length, 1);
+  assert.equal(listed.json.data[0].closed, false);
+  assert.equal(deleted.status, 200);
 });
 
 test('POST /api/reservations creates valid reservation', async () => {
