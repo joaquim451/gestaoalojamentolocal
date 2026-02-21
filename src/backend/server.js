@@ -8,6 +8,12 @@ const { hashPassword, verifyPassword, createToken, verifyToken } = require('./au
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const RESERVATION_STATUSES = new Set(['confirmed', 'cancelled', 'checked_in', 'checked_out']);
+const RESERVATION_STATUS_TRANSITIONS = {
+  confirmed: new Set(['confirmed', 'cancelled', 'checked_in']),
+  cancelled: new Set(['cancelled', 'confirmed']),
+  checked_in: new Set(['checked_in', 'checked_out']),
+  checked_out: new Set(['checked_out'])
+};
 const USER_ROLES = new Set(['admin', 'manager']);
 const AUTH_PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH || 10);
 const AUTH_LOGIN_MAX_ATTEMPTS = Number(process.env.AUTH_LOGIN_MAX_ATTEMPTS || 5);
@@ -178,6 +184,14 @@ function applyAvailabilityOverride(baseConstraints, override) {
 
 function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function isValidReservationStatusTransition(currentStatus, nextStatus) {
+  const allowed = RESERVATION_STATUS_TRANSITIONS[currentStatus];
+  if (!allowed) {
+    return false;
+  }
+  return allowed.has(nextStatus);
 }
 
 function validateStayAgainstAvailability(db, accommodationId, checkIn, checkOut) {
@@ -1930,6 +1944,12 @@ app.put('/api/reservations/:id', (req, res) => {
       error: 'status invalido. Valores permitidos: confirmed, cancelled, checked_in, checked_out'
     });
   }
+  if (!isValidReservationStatusTransition(current.status, nextStatus)) {
+    return res.status(400).json({
+      ok: false,
+      error: `Transicao de estado invalida: ${current.status} -> ${nextStatus}.`
+    });
+  }
 
   const hasConflict = db.reservations.some((item) => {
     if (item.id === current.id || item.accommodationId !== current.accommodationId) {
@@ -2005,6 +2025,42 @@ app.patch('/api/reservations/:id/status', (req, res) => {
   }
 
   const reservation = db.reservations[index];
+  if (!isValidReservationStatusTransition(reservation.status, status)) {
+    return res.status(400).json({
+      ok: false,
+      error: `Transicao de estado invalida: ${reservation.status} -> ${status}.`
+    });
+  }
+  const isReactivating = reservation.status === 'cancelled' && status !== 'cancelled';
+  if (isReactivating) {
+    const hasConflict = db.reservations.some((item) => {
+      if (item.id === reservation.id || item.accommodationId !== reservation.accommodationId) {
+        return false;
+      }
+      if (item.status === 'cancelled') {
+        return false;
+      }
+      return hasDateRangeOverlap(item.checkIn, item.checkOut, reservation.checkIn, reservation.checkOut);
+    });
+    if (hasConflict) {
+      return res.status(409).json({ ok: false, error: 'Conflito de datas: ja existe reserva para este intervalo.' });
+    }
+
+    const availabilityValidation = validateStayAgainstAvailability(
+      db,
+      reservation.accommodationId,
+      reservation.checkIn,
+      reservation.checkOut
+    );
+    if (!availabilityValidation.ok) {
+      return res.status(availabilityValidation.status).json({
+        ok: false,
+        error: availabilityValidation.error,
+        details: availabilityValidation.details
+      });
+    }
+  }
+
   reservation.status = status;
   reservation.updatedAt = new Date().toISOString();
   db.reservations[index] = reservation;

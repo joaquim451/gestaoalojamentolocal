@@ -218,10 +218,16 @@ ou
 }
 ```
   - valores permitidos: `confirmed`, `cancelled`, `checked_in`, `checked_out`
+  - transições válidas:
+    - `confirmed` -> `cancelled` | `checked_in`
+    - `cancelled` -> `confirmed`
+    - `checked_in` -> `checked_out`
+    - `checked_out` não permite novas transições
+  - ao reativar uma reserva (`cancelled` -> estado ativo), valida novamente sobreposição e disponibilidade (rules + overrides)
 - `GET /api/reservations/:id`
 - `PUT /api/reservations/:id`
   - permite atualizar: `guestName`, `checkIn`, `checkOut`, `adults`, `children`, `source`, `status`
-  - mantém validações de datas, sobreposição e disponibilidade (rules + overrides)
+  - mantém validações de datas, sobreposição, disponibilidade (rules + overrides) e transição de estado
 - `DELETE /api/reservations/:id`
   - remove reserva do registo local
 

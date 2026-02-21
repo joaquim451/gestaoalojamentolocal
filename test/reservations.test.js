@@ -1624,6 +1624,157 @@ test('PATCH /api/reservations/:id/status updates state', async () => {
   assert.equal(patched.json.data.status, 'checked_in');
 });
 
+test('PATCH /api/reservations/:id/status blocks reactivation when overlapping reservation exists', async () => {
+  const token = await loginAsAdmin(server);
+  const first = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Reactivar',
+      checkIn: '2026-05-10',
+      checkOut: '2026-05-12'
+    },
+    token
+  );
+
+  await request(
+    server,
+    'PATCH',
+    `/api/reservations/${first.json.data.id}/status`,
+    { status: 'cancelled' },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Conflito',
+      checkIn: '2026-05-10',
+      checkOut: '2026-05-12'
+    },
+    token
+  );
+
+  const reactivated = await request(
+    server,
+    'PATCH',
+    `/api/reservations/${first.json.data.id}/status`,
+    { status: 'confirmed' },
+    token
+  );
+
+  assert.equal(reactivated.status, 409);
+  assert.equal(reactivated.json.ok, false);
+});
+
+test('PATCH /api/reservations/:id/status blocks reactivation when dates are unavailable', async () => {
+  const token = await loginAsAdmin(server);
+  const cancelledReservation = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Reserva Indisponivel',
+      checkIn: '2026-05-15',
+      checkOut: '2026-05-17',
+      status: 'cancelled'
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-05-16',
+      endDate: '2026-05-16',
+      closed: true
+    },
+    token
+  );
+
+  const reactivated = await request(
+    server,
+    'PATCH',
+    `/api/reservations/${cancelledReservation.json.data.id}/status`,
+    { status: 'confirmed' },
+    token
+  );
+
+  assert.equal(reactivated.status, 409);
+  assert.equal(reactivated.json.ok, false);
+});
+
+test('PATCH /api/reservations/:id/status rejects invalid transition confirmed -> checked_out', async () => {
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Transicao Invalida Patch',
+      checkIn: '2026-05-20',
+      checkOut: '2026-05-22'
+    },
+    token
+  );
+
+  const patched = await request(
+    server,
+    'PATCH',
+    `/api/reservations/${created.json.data.id}/status`,
+    { status: 'checked_out' },
+    token
+  );
+
+  assert.equal(patched.status, 400);
+  assert.equal(patched.json.ok, false);
+});
+
+test('PUT /api/reservations/:id rejects invalid transition checked_in -> confirmed', async () => {
+  const token = await loginAsAdmin(server);
+  const created = await request(
+    server,
+    'POST',
+    '/api/reservations',
+    {
+      accommodationId: 'acc_test_1',
+      guestName: 'Transicao Invalida Put',
+      checkIn: '2026-05-25',
+      checkOut: '2026-05-27'
+    },
+    token
+  );
+
+  await request(
+    server,
+    'PATCH',
+    `/api/reservations/${created.json.data.id}/status`,
+    { status: 'checked_in' },
+    token
+  );
+
+  const updated = await request(
+    server,
+    'PUT',
+    `/api/reservations/${created.json.data.id}`,
+    { status: 'confirmed' },
+    token
+  );
+
+  assert.equal(updated.status, 400);
+  assert.equal(updated.json.ok, false);
+});
+
 test('GET /api/calendar returns active reservations in range', async () => {
   const token = await loginAsAdmin(server);
   await request(
