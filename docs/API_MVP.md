@@ -133,6 +133,10 @@ ou
   "closedToDeparture": false,
   "minNights": 0,
   "maxNights": 0,
+  "minAdvanceHours": 0,
+  "maxAdvanceDays": 0,
+  "allowedArrivalWeekdays": [1, 2, 3, 4, 5],
+  "allowedDepartureWeekdays": [0, 1, 2, 3, 4, 5, 6],
   "note": "Natal fechado"
 }
 ```
@@ -142,6 +146,8 @@ ou
   - bloqueia check-out em datas `closedToDeparture=true`
   - aplica estadia mínima por período (`minNights`)
   - aplica estadia máxima por período (`maxNights`)
+  - aplica antecedência mínima (`minAdvanceHours`) e máxima (`maxAdvanceDays`)
+  - restringe dias da semana permitidos para check-in/check-out
 
 ## Calendário de Disponibilidade (Diário)
 - `GET /api/availability-calendar`
@@ -151,7 +157,8 @@ ou
     - estado (`available`, `booked`, `closed`)
     - IDs de reservas a ocupar a data
     - regras de disponibilidade acionadas
-    - flags de restrição (`closedToArrival`, `closedToDeparture`, `minNightsConstraint`, `maxNightsConstraint`)
+    - flags de restrição (`closedToArrival`, `closedToDeparture`, `minNightsConstraint`, `maxNightsConstraint`, `minAdvanceHours`, `maxAdvanceDays`)
+    - dias permitidos (`allowedArrivalWeekdays`, `allowedDepartureWeekdays`) e `canBookArrivalNow`
     - preço sugerido por noite (quando existir rate plan)
 
 ## Reservas

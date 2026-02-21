@@ -44,6 +44,37 @@ function countNights(checkIn, checkOut) {
   return Math.floor((end - start) / (24 * 60 * 60 * 1000));
 }
 
+function getNow() {
+  if (process.env.TEST_NOW && isValidIsoDate(process.env.TEST_NOW)) {
+    return new Date(process.env.TEST_NOW);
+  }
+  return new Date();
+}
+
+function normalizeWeekdaysInput(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized = value
+    .map((item) => Number.parseInt(item, 10))
+    .filter((item) => Number.isInteger(item) && item >= 0 && item <= 6);
+
+  return [...new Set(normalized)];
+}
+
+function intersectWeekdaySets(weekdaySets) {
+  if (!Array.isArray(weekdaySets) || weekdaySets.length === 0) {
+    return [];
+  }
+
+  let intersection = [...weekdaySets[0]];
+  for (let i = 1; i < weekdaySets.length; i += 1) {
+    intersection = intersection.filter((day) => weekdaySets[i].includes(day));
+  }
+  return intersection;
+}
+
 function pickSeasonalMultiplier(seasonalAdjustments, dateStr) {
   if (!Array.isArray(seasonalAdjustments)) {
     return 1;
@@ -68,12 +99,28 @@ function pickAvailabilityConstraints(availabilityRules, accommodationId, dateStr
     .map((item) => Number(item.maxNights) || 0)
     .filter((value) => value > 0);
 
+  const positiveMaxAdvanceDays = matching
+    .map((item) => Number(item.maxAdvanceDays) || 0)
+    .filter((value) => value > 0);
+
+  const arrivalWeekdaySets = matching
+    .map((item) => normalizeWeekdaysInput(item.allowedArrivalWeekdays))
+    .filter((days) => days.length > 0);
+
+  const departureWeekdaySets = matching
+    .map((item) => normalizeWeekdaysInput(item.allowedDepartureWeekdays))
+    .filter((days) => days.length > 0);
+
   return {
     closed: matching.some((item) => Boolean(item.closed)),
     closedToArrival: matching.some((item) => Boolean(item.closedToArrival)),
     closedToDeparture: matching.some((item) => Boolean(item.closedToDeparture)),
     minNights: matching.reduce((acc, item) => Math.max(acc, Number(item.minNights) || 0), 0),
     maxNights: positiveMaxNights.length > 0 ? Math.min(...positiveMaxNights) : 0,
+    minAdvanceHours: matching.reduce((acc, item) => Math.max(acc, Number(item.minAdvanceHours) || 0), 0),
+    maxAdvanceDays: positiveMaxAdvanceDays.length > 0 ? Math.min(...positiveMaxAdvanceDays) : 0,
+    allowedArrivalWeekdays: arrivalWeekdaySets.length > 0 ? intersectWeekdaySets(arrivalWeekdaySets) : [],
+    allowedDepartureWeekdays: departureWeekdaySets.length > 0 ? intersectWeekdaySets(departureWeekdaySets) : [],
     matchingRuleIds: matching.map((item) => item.id)
   };
 }
@@ -911,6 +958,10 @@ app.post('/api/availability-rules', (req, res) => {
     closedToDeparture,
     minNights,
     maxNights,
+    minAdvanceHours,
+    maxAdvanceDays,
+    allowedArrivalWeekdays,
+    allowedDepartureWeekdays,
     note
   } = req.body || {};
   if (!accommodationId || !startDate || !endDate) {
@@ -929,8 +980,22 @@ app.post('/api/availability-rules', (req, res) => {
 
   const normalizedMinNights = Number.isFinite(Number(minNights)) ? Number(minNights) : 0;
   const normalizedMaxNights = Number.isFinite(Number(maxNights)) ? Number(maxNights) : 0;
+  const normalizedMinAdvanceHours = Number.isFinite(Number(minAdvanceHours)) ? Number(minAdvanceHours) : 0;
+  const normalizedMaxAdvanceDays = Number.isFinite(Number(maxAdvanceDays)) ? Number(maxAdvanceDays) : 0;
+  const normalizedArrivalWeekdays = normalizeWeekdaysInput(allowedArrivalWeekdays);
+  const normalizedDepartureWeekdays = normalizeWeekdaysInput(allowedDepartureWeekdays);
+
   if (normalizedMaxNights > 0 && normalizedMaxNights < normalizedMinNights) {
     return res.status(400).json({ ok: false, error: 'maxNights nao pode ser inferior a minNights.' });
+  }
+  if (normalizedMinAdvanceHours < 0 || normalizedMaxAdvanceDays < 0) {
+    return res.status(400).json({ ok: false, error: 'minAdvanceHours/maxAdvanceDays nao podem ser negativos.' });
+  }
+  if (Array.isArray(allowedArrivalWeekdays) && normalizedArrivalWeekdays.length !== allowedArrivalWeekdays.length) {
+    return res.status(400).json({ ok: false, error: 'allowedArrivalWeekdays deve conter apenas inteiros de 0 a 6.' });
+  }
+  if (Array.isArray(allowedDepartureWeekdays) && normalizedDepartureWeekdays.length !== allowedDepartureWeekdays.length) {
+    return res.status(400).json({ ok: false, error: 'allowedDepartureWeekdays deve conter apenas inteiros de 0 a 6.' });
   }
 
   const rule = {
@@ -943,6 +1008,10 @@ app.post('/api/availability-rules', (req, res) => {
     closedToDeparture: Boolean(closedToDeparture),
     minNights: Math.max(normalizedMinNights, 0),
     maxNights: Math.max(normalizedMaxNights, 0),
+    minAdvanceHours: Math.max(normalizedMinAdvanceHours, 0),
+    maxAdvanceDays: Math.max(normalizedMaxAdvanceDays, 0),
+    allowedArrivalWeekdays: normalizedArrivalWeekdays,
+    allowedDepartureWeekdays: normalizedDepartureWeekdays,
     note: note || null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -961,7 +1030,11 @@ app.post('/api/availability-rules', (req, res) => {
       closedToArrival: rule.closedToArrival,
       closedToDeparture: rule.closedToDeparture,
       minNights: rule.minNights,
-      maxNights: rule.maxNights
+      maxNights: rule.maxNights,
+      minAdvanceHours: rule.minAdvanceHours,
+      maxAdvanceDays: rule.maxAdvanceDays,
+      allowedArrivalWeekdays: rule.allowedArrivalWeekdays,
+      allowedDepartureWeekdays: rule.allowedDepartureWeekdays
     }
   });
   writeDb(db);
@@ -1001,6 +1074,23 @@ app.post('/api/rate-quote', (req, res) => {
   const minNightsFromPlan = Number(plan.minNights || 1);
   const arrivalConstraints = pickAvailabilityConstraints(db.availabilityRules, accommodationId, formatIsoDateOnly(checkIn));
   const departureConstraints = pickAvailabilityConstraints(db.availabilityRules, accommodationId, formatIsoDateOnly(checkOut));
+  const checkInDay = new Date(checkIn).getUTCDay();
+  const checkOutDay = new Date(checkOut).getUTCDay();
+  const now = getNow();
+  const hoursUntilCheckIn = (new Date(checkIn) - now) / (60 * 60 * 1000);
+  const daysUntilCheckIn = (new Date(checkIn) - now) / (24 * 60 * 60 * 1000);
+
+  const effectiveMinAdvanceHours = Math.max(
+    Number(arrivalConstraints.minAdvanceHours || 0),
+    Number(departureConstraints.minAdvanceHours || 0)
+  );
+  const effectiveMaxAdvanceDaysCandidates = [
+    Number(arrivalConstraints.maxAdvanceDays || 0),
+    Number(departureConstraints.maxAdvanceDays || 0)
+  ].filter((value) => value > 0);
+  const effectiveMaxAdvanceDays = effectiveMaxAdvanceDaysCandidates.length > 0
+    ? Math.min(...effectiveMaxAdvanceDaysCandidates)
+    : 0;
 
   if (arrivalConstraints.closedToArrival) {
     return res.status(409).json({
@@ -1014,6 +1104,40 @@ app.post('/api/rate-quote', (req, res) => {
       ok: false,
       error: `Check-out indisponivel em ${formatIsoDateOnly(checkOut)} (closedToDeparture).`,
       details: { date: formatIsoDateOnly(checkOut), matchingRuleIds: departureConstraints.matchingRuleIds }
+    });
+  }
+  if (
+    arrivalConstraints.allowedArrivalWeekdays.length > 0
+    && !arrivalConstraints.allowedArrivalWeekdays.includes(checkInDay)
+  ) {
+    return res.status(409).json({
+      ok: false,
+      error: `Check-in nao permitido no dia da semana ${checkInDay}.`,
+      details: { checkInDay, allowedArrivalWeekdays: arrivalConstraints.allowedArrivalWeekdays }
+    });
+  }
+  if (
+    departureConstraints.allowedDepartureWeekdays.length > 0
+    && !departureConstraints.allowedDepartureWeekdays.includes(checkOutDay)
+  ) {
+    return res.status(409).json({
+      ok: false,
+      error: `Check-out nao permitido no dia da semana ${checkOutDay}.`,
+      details: { checkOutDay, allowedDepartureWeekdays: departureConstraints.allowedDepartureWeekdays }
+    });
+  }
+  if (effectiveMinAdvanceHours > 0 && hoursUntilCheckIn < effectiveMinAdvanceHours) {
+    return res.status(409).json({
+      ok: false,
+      error: `Reserva requer antecedencia minima de ${effectiveMinAdvanceHours} horas.`,
+      details: { effectiveMinAdvanceHours, hoursUntilCheckIn: Number(hoursUntilCheckIn.toFixed(2)) }
+    });
+  }
+  if (effectiveMaxAdvanceDays > 0 && daysUntilCheckIn > effectiveMaxAdvanceDays) {
+    return res.status(409).json({
+      ok: false,
+      error: `Reserva permite antecedencia maxima de ${effectiveMaxAdvanceDays} dias.`,
+      details: { effectiveMaxAdvanceDays, daysUntilCheckIn: Number(daysUntilCheckIn.toFixed(2)) }
     });
   }
 
@@ -1100,8 +1224,12 @@ app.post('/api/rate-quote', (req, res) => {
         minNightsFromRules,
         maxNightsFromRules,
         effectiveMinNights,
+        effectiveMinAdvanceHours,
+        effectiveMaxAdvanceDays,
         closedToArrival: arrivalConstraints.closedToArrival,
         closedToDeparture: departureConstraints.closedToDeparture,
+        allowedArrivalWeekdays: arrivalConstraints.allowedArrivalWeekdays,
+        allowedDepartureWeekdays: departureConstraints.allowedDepartureWeekdays,
         triggeredAvailabilityRuleIds: [...triggeredRuleIds]
       },
       perNightDetails,
@@ -1146,6 +1274,10 @@ app.get('/api/availability-calendar', (req, res) => {
   for (let cursor = new Date(start); cursor <= end; cursor = addDays(cursor, 1)) {
     const dateStr = formatIsoDateOnly(cursor);
     const nextDay = formatIsoDateOnly(addDays(cursor, 1));
+    const now = getNow();
+    const hoursUntilDate = (new Date(dateStr) - now) / (60 * 60 * 1000);
+    const daysUntilDate = (new Date(dateStr) - now) / (24 * 60 * 60 * 1000);
+    const dayOfWeek = cursor.getUTCDay();
 
     const bookedReservations = db.reservations.filter((item) => {
       if (item.accommodationId !== accommodationId || item.status === 'cancelled') {
@@ -1155,6 +1287,13 @@ app.get('/api/availability-calendar', (req, res) => {
     });
 
     const availability = pickAvailabilityConstraints(db.availabilityRules, accommodationId, dateStr);
+    const isArrivalWeekdayAllowed = availability.allowedArrivalWeekdays.length === 0
+      || availability.allowedArrivalWeekdays.includes(dayOfWeek);
+    const isWithinMinAdvance = hoursUntilDate >= Number(availability.minAdvanceHours || 0);
+    const isWithinMaxAdvance = Number(availability.maxAdvanceDays || 0) === 0
+      || daysUntilDate <= Number(availability.maxAdvanceDays || 0);
+    const canBookArrivalNow = isArrivalWeekdayAllowed && isWithinMinAdvance && isWithinMaxAdvance;
+
     let status = 'available';
     let reason = null;
     if (bookedReservations.length > 0) {
@@ -1193,6 +1332,11 @@ app.get('/api/availability-calendar', (req, res) => {
       reason,
       closedToArrival: availability.closedToArrival,
       closedToDeparture: availability.closedToDeparture,
+      allowedArrivalWeekdays: availability.allowedArrivalWeekdays,
+      allowedDepartureWeekdays: availability.allowedDepartureWeekdays,
+      minAdvanceHours: availability.minAdvanceHours,
+      maxAdvanceDays: availability.maxAdvanceDays,
+      canBookArrivalNow,
       maxNightsConstraint: availability.maxNights,
       minNightsConstraint: availability.minNights,
       triggeredAvailabilityRuleIds: availability.matchingRuleIds,

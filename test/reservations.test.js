@@ -14,6 +14,7 @@ process.env.AUTH_BOOTSTRAP_ADMIN_PASSWORD = 'test-password-123';
 process.env.AUTH_BOOTSTRAP_ADMIN_NAME = 'Test Admin';
 process.env.AUTH_LOGIN_MAX_ATTEMPTS = '3';
 process.env.AUTH_LOGIN_LOCK_MINUTES = '5';
+process.env.TEST_NOW = '2026-01-01T00:00:00.000Z';
 
 const { app } = require('../src/backend/server');
 
@@ -848,6 +849,152 @@ test('POST /api/rate-quote enforces max nights from availability rules', async (
 
   assert.equal(tooLong.status, 400);
   assert.equal(allowed.status, 200);
+});
+
+test('POST /api/rate-quote enforces arrival/departure weekdays', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Weekdays',
+      currency: 'EUR',
+      baseNightlyRate: 95
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-03-01',
+      endDate: '2026-03-31',
+      allowedArrivalWeekdays: [1],
+      allowedDepartureWeekdays: [3]
+    },
+    token
+  );
+
+  const invalidArrival = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-03-03',
+      checkOut: '2026-03-05'
+    },
+    token
+  );
+
+  const invalidDeparture = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-03-02',
+      checkOut: '2026-03-05'
+    },
+    token
+  );
+
+  const valid = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-03-02',
+      checkOut: '2026-03-04'
+    },
+    token
+  );
+
+  assert.equal(invalidArrival.status, 409);
+  assert.equal(invalidDeparture.status, 409);
+  assert.equal(valid.status, 200);
+});
+
+test('POST /api/rate-quote enforces advance notice windows', async () => {
+  const token = await loginAsAdmin(server);
+  const plan = await request(
+    server,
+    'POST',
+    '/api/rate-plans',
+    {
+      accommodationId: 'acc_test_1',
+      name: 'Tarifa Advance',
+      currency: 'EUR',
+      baseNightlyRate: 88
+    },
+    token
+  );
+
+  await request(
+    server,
+    'POST',
+    '/api/availability-rules',
+    {
+      accommodationId: 'acc_test_1',
+      startDate: '2026-01-01',
+      endDate: '2026-12-31',
+      minAdvanceHours: 48,
+      maxAdvanceDays: 90
+    },
+    token
+  );
+
+  const tooSoon = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-01-02',
+      checkOut: '2026-01-04'
+    },
+    token
+  );
+
+  const tooFar = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-06-15',
+      checkOut: '2026-06-17'
+    },
+    token
+  );
+
+  const valid = await request(
+    server,
+    'POST',
+    '/api/rate-quote',
+    {
+      accommodationId: 'acc_test_1',
+      ratePlanId: plan.json.data.id,
+      checkIn: '2026-02-15',
+      checkOut: '2026-02-17'
+    },
+    token
+  );
+
+  assert.equal(tooSoon.status, 409);
+  assert.equal(tooFar.status, 409);
+  assert.equal(valid.status, 200);
 });
 
 test('GET /api/availability-calendar returns booked and closed days', async () => {
